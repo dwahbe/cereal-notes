@@ -41,7 +41,7 @@ the onboarding flow into a single page...
 
 ## Requirements
 
-- macOS 13+ (Ventura)
+- macOS 26+ (Tahoe)
 - Apple Silicon (M1+) recommended for optimal transcription performance
 - Screen Recording & Microphone permissions
 

@@ -7,7 +7,7 @@ A minimal macOS menu bar app that captures meeting audio, transcribes it locally
 ## How It Works
 
 1. **Capture** — Records system audio + mic from any meeting app (Zoom, Meet, Teams, Slack, FaceTime) via ScreenCaptureKit
-2. **Transcribe** — Runs locally on-device with [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — audio never leaves your machine
+2. **Transcribe** — Runs locally on-device using Apple's [Speech framework](https://developer.apple.com/documentation/speech) (`SFSpeechRecognizer`) — audio never leaves your machine
 3. **Summarize** — Sends transcript to an LLM of your choice (BYOK: Claude, OpenAI, Ollama) for summaries and action items
 4. **Export** — Drops a structured `.md` file wherever you want it (Obsidian vault, Notion, Apple Notes, a folder)
 
@@ -49,7 +49,7 @@ the onboarding flow into a single page...
 
 - **Language:** Swift (SwiftUI)
 - **Audio Capture:** ScreenCaptureKit + AVAudioEngine
-- **Transcription:** whisper.cpp (bundled, base.en model ~142 MB)
+- **Transcription:** Apple Speech framework (`SFSpeechRecognizer`, on-device)
 - **AI Processing:** Bring Your Own Key (Claude, OpenAI, Ollama, any OpenAI-compatible endpoint)
 - **No Electron. No web views.**
 
@@ -59,7 +59,7 @@ the onboarding flow into a single page...
 |---------|-------|
 | v0.1 | Menu bar shell, audio capture, local transcription, raw transcript export |
 | v0.2 | BYOK AI summaries, action items, YAML frontmatter, custom prompts |
-| v0.3 | Global hotkeys, auto-export, model selection, Ollama support |
+| v0.3 | Global hotkeys, auto-export, Ollama support |
 | v0.4 | Homebrew cask, docs, contribution guide, template system |
 
 ## Non-Goals

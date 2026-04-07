@@ -10,5 +10,9 @@
     <string>Cereal Notes</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Cereal Notes captures system audio to transcribe your meetings.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Cereal Notes uses the microphone to record audio alongside system audio.</string>
 </dict>
 </plist>

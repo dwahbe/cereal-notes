@@ -34,11 +34,21 @@ final class StorageSettings {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
+        panel.canSelectHiddenExtension = true
+        panel.treatsFilePackagesAsDirectories = false
         panel.prompt = "Select"
         panel.message = "Choose where to save recordings"
+
+        // Temporarily become a regular app so the panel can come to front
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
+        panel.level = .modalPanel
 
         if panel.runModal() == .OK, let url = panel.url {
             storageLocation = url
         }
+
+        // Return to accessory (menu bar only) mode
+        NSApp.setActivationPolicy(.accessory)
     }
 }

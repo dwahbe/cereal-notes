@@ -30,26 +30,42 @@ struct MenuBarView: View {
                 .font(.headline)
         }
 
-        Button(action: { recordingState.start() }) {
+        Button(action: {
+            Task { await recordingState.start(storageDirectory: storageSettings.storageLocation) }
+        }) {
             Label("Start Recording", systemImage: "record.circle")
                 .frame(maxWidth: .infinity)
         }
         .controlSize(.large)
-        .glassEffect()
+        .buttonStyle(.glassProminent)
 
-        HStack {
-            Text("Storage")
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button(action: { storageSettings.pickFolder() }) {
-                Text(storageSettings.storageLocationName)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.primary)
+        if let error = recordingState.errorMessage {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .lineLimit(2)
         }
-        .font(.caption)
+
+        Button(action: { storageSettings.pickFolder() }) {
+            HStack(spacing: 8) {
+                Image(systemName: "folder")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Storage Location")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(storageSettings.storageLocationName)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .buttonStyle(.glass)
     }
 
     // MARK: - Recording
@@ -73,6 +89,6 @@ struct MenuBarView: View {
                 .frame(maxWidth: .infinity)
         }
         .controlSize(.large)
-        .glassEffect()
+        .buttonStyle(.glassProminent)
     }
 }

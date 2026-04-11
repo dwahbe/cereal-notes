@@ -46,12 +46,12 @@ duration: 47m
 
 ## Roadmap
 
-| Version | Focus |
-|---------|-------|
-| v0.1 | Menu bar shell, audio capture, local transcription, raw transcript export |
-| v0.2 | AI summaries, action items, YAML frontmatter, custom prompts |
-| v0.3 | Global hotkeys, auto-export, Ollama support |
-| v0.4 | Homebrew cask, docs, contribution guide, template system |
+| Version | Focus                                                                     |
+|---------|---------------------------------------------------------------------------|
+| v0.1    | Menu bar shell, audio capture, local transcription, raw transcript export |
+| v0.2    | AI summaries, action items, YAML frontmatter, custom prompts              |
+| v0.3    | Global hotkeys, auto-export, Ollama support                               |
+| v0.4    | Homebrew cask, docs, contribution guide, template system                  |
 
 ## Non-Goals
 

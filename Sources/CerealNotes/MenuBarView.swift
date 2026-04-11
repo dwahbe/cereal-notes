@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuBarView: View {
     @Environment(RecordingState.self) private var recordingState
     @Environment(StorageSettings.self) private var storageSettings
+    @Environment(ModelDownloadState.self) private var modelDownloadState
 
     var body: some View {
         GlassEffectContainer {
@@ -30,6 +31,24 @@ struct MenuBarView: View {
                 .font(.headline)
         }
 
+        switch modelDownloadState.status {
+        case .downloading:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Downloading models…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .failed(let message):
+            Text("Model error: \(message)")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .lineLimit(2)
+        default:
+            EmptyView()
+        }
+
         Button(action: {
             Task { await recordingState.start(storageDirectory: storageSettings.storageLocation) }
         }) {
@@ -38,6 +57,10 @@ struct MenuBarView: View {
         }
         .controlSize(.large)
         .buttonStyle(.glassProminent)
+        .disabled({
+            if case .ready = modelDownloadState.status { return false }
+            return true
+        }())
 
         if let error = recordingState.errorMessage {
             Text(error)

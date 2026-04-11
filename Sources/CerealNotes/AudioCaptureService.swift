@@ -16,16 +16,18 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
 
     private var onError: (@Sendable (Error) -> Void)?
 
+    /// Called with ([Float] samples, Double sampleRate) for each system audio buffer.
+    var onSystemAudioBuffer: (@Sendable ([Float], Double) -> Void)?
+    /// Called with ([Float] samples, Double sampleRate) for each mic audio buffer.
+    var onMicAudioBuffer: (@Sendable ([Float], Double) -> Void)?
+
     private static let sampleRate: Double = 48000
     private static let channelCount: AVAudioChannelCount = 1
 
     // MARK: - Public API
 
-    func startCapture(storageDirectory: URL, onError: @escaping @Sendable (Error) -> Void) async throws {
+    func startCapture(sessionDir: URL, onError: @escaping @Sendable (Error) -> Void) async throws {
         self.onError = onError
-
-        let sessionDir = storageDirectory.appendingPathComponent(sessionDirectoryName())
-        try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
 
         // Request mic permission upfront — accessing AVAudioEngine.inputNode
         // without permission can crash on macOS 15+.
@@ -56,6 +58,8 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
             micAudioFile = nil
         }
         onError = nil
+        onSystemAudioBuffer = nil
+        onMicAudioBuffer = nil
     }
 
     // MARK: - Process Tap (Primary — triggers "System Audio Recording Only")
@@ -110,6 +114,11 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
 
         sysInputNode.installTap(onBus: 0, bufferSize: 4096, format: sysTapFormat) { [weak self] buffer, _ in
             self?.writeBuffer(buffer, for: \.systemAudioFile)
+            if let callback = self?.onSystemAudioBuffer,
+               let data = buffer.floatChannelData?[0] {
+                let samples = Array(UnsafeBufferPointer(start: data, count: Int(buffer.frameLength)))
+                callback(samples, sysTapFormat.sampleRate)
+            }
         }
         try sysEngine.start()
         systemEngine = sysEngine
@@ -139,6 +148,11 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
 
         micInputNode.installTap(onBus: 0, bufferSize: 4096, format: micTapFormat) { [weak self] buffer, _ in
             self?.writeBuffer(buffer, for: \.micAudioFile)
+            if let callback = self?.onMicAudioBuffer,
+               let data = buffer.floatChannelData?[0] {
+                let samples = Array(UnsafeBufferPointer(start: data, count: Int(buffer.frameLength)))
+                callback(samples, micTapFormat.sampleRate)
+            }
         }
         try micEng.start()
         micEngine = micEng
@@ -224,7 +238,11 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     }
 
     /// Convert CMSampleBuffer to AVAudioPCMBuffer and write (SCK fallback only)
-    private func writeSampleBuffer(_ sampleBuffer: CMSampleBuffer, to keyPath: KeyPath<AudioCaptureService, AVAudioFile?>) {
+    private func writeSampleBuffer(
+        _ sampleBuffer: CMSampleBuffer,
+        to keyPath: KeyPath<AudioCaptureService, AVAudioFile?>,
+        callback: ((@Sendable ([Float], Double) -> Void))? = nil
+    ) {
         guard let formatDescription = sampleBuffer.formatDescription,
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription),
               let format = AVAudioFormat(streamDescription: asbd),
@@ -252,16 +270,13 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         memcpy(destPtr, dataPointer, bytesToCopy)
 
         writeBuffer(pcmBuffer, for: keyPath)
+
+        if let callback {
+            let samples = Array(UnsafeBufferPointer(start: destPtr, count: Int(pcmBuffer.frameLength)))
+            callback(samples, format.sampleRate)
+        }
     }
 
-    // MARK: - Helpers
-
-    private func sessionDirectoryName() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd 'at' h.mm.ss a"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return formatter.string(from: Date())
-    }
 }
 
 // MARK: - SCStreamOutput (fallback)
@@ -271,9 +286,9 @@ extension AudioCaptureService: SCStreamOutput {
         guard sampleBuffer.isValid else { return }
         switch type {
         case .audio:
-            writeSampleBuffer(sampleBuffer, to: \.systemAudioFile)
+            writeSampleBuffer(sampleBuffer, to: \.systemAudioFile, callback: onSystemAudioBuffer)
         case .microphone:
-            writeSampleBuffer(sampleBuffer, to: \.micAudioFile)
+            writeSampleBuffer(sampleBuffer, to: \.micAudioFile, callback: onMicAudioBuffer)
         case .screen:
             break
         @unknown default:

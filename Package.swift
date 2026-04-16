@@ -26,15 +26,7 @@ let package = Package(
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],
             path: "Sources/CerealNotes",
-            exclude: ["Info.plist", "CerealNotes.entitlements"],
-            linkerSettings: [
-                .unsafeFlags([
-                    "-Xlinker", "-sectcreate",
-                    "-Xlinker", "__TEXT",
-                    "-Xlinker", "__info_plist",
-                    "-Xlinker", "Sources/CerealNotes/Info.plist"
-                ])
-            ]
+            exclude: ["Info.plist", "CerealNotes.entitlements"]
         ),
         .testTarget(
             name: "AudioPipelineTests",

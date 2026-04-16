@@ -4,6 +4,12 @@ struct MenuBarView: View {
     @Environment(RecordingState.self) private var recordingState
     @Environment(StorageSettings.self) private var storageSettings
     @Environment(ModelDownloadState.self) private var modelDownloadState
+    @Environment(MeetingDetectionService.self) private var meetingDetectionService
+
+    private var modelsReady: Bool {
+        if case .ready = modelDownloadState.status { return true }
+        return false
+    }
 
     var body: some View {
         GlassEffectContainer {
@@ -49,18 +55,36 @@ struct MenuBarView: View {
             EmptyView()
         }
 
-        Button(action: {
-            Task { await recordingState.start(storageDirectory: storageSettings.storageLocation) }
-        }) {
-            Label("Start Recording", systemImage: "record.circle")
-                .frame(maxWidth: .infinity)
+        if let meeting = meetingDetectionService.detectedMeeting, modelsReady {
+            VStack(spacing: 8) {
+                Text("\(meeting.appName) call detected")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Button("Dismiss") { meetingDetectionService.dismissCurrent() }
+                        .controlSize(.large)
+                        .buttonStyle(.glass)
+                    Button(action: {
+                        Task { await recordingState.start(storageDirectory: storageSettings.storageLocation) }
+                    }) {
+                        Label("Record", systemImage: "record.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                    .buttonStyle(.glassProminent)
+                }
+            }
+        } else {
+            Button(action: {
+                Task { await recordingState.start(storageDirectory: storageSettings.storageLocation) }
+            }) {
+                Label("Start Recording", systemImage: "record.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .controlSize(.large)
+            .buttonStyle(.glassProminent)
+            .disabled(!modelsReady)
         }
-        .controlSize(.large)
-        .buttonStyle(.glassProminent)
-        .disabled({
-            if case .ready = modelDownloadState.status { return false }
-            return true
-        }())
 
         if let error = recordingState.errorMessage {
             Text(error)

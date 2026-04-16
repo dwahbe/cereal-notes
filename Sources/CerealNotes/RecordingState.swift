@@ -6,6 +6,8 @@ final class RecordingState {
     var elapsedTime: TimeInterval = 0
     var errorMessage: String?
 
+    @ObservationIgnored var onRecordingChange: (@MainActor () -> Void)?
+
     private var timer: Timer?
     private var startDate: Date?
     private let captureService = AudioCaptureService()
@@ -21,6 +23,11 @@ final class RecordingState {
         await stopCapture()
 
         do {
+            // Idempotent — if models are already loaded this returns immediately.
+            // If a download kicked off at app launch is still in flight, the
+            // actor serializes us behind it so we don't race to re-download.
+            try await transcriptionService.downloadModelsIfNeeded()
+
             let sessionDir = storageDirectory.appendingPathComponent(Self.sessionDirectoryName())
             try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
 
@@ -47,6 +54,7 @@ final class RecordingState {
             errorMessage = nil
             startDate = now
             elapsedTime = 0
+            onRecordingChange?()
             timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self, let startDate = self.startDate else { return }
@@ -63,6 +71,7 @@ final class RecordingState {
         timer?.invalidate()
         timer = nil
         startDate = nil
+        onRecordingChange?()
         Task {
             await transcriptionService.endSession()
             await stopCapture()

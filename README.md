@@ -37,6 +37,18 @@ duration: 47m
 - Apple Silicon (M1+) recommended for optimal transcription performance
 - Screen Recording & Microphone permissions
 
+## Running locally
+
+```bash
+./scripts/run.sh          # build + wrap as .app + launch
+./scripts/build-app.sh    # build + wrap only
+swift test                # run tests
+```
+
+The app is built via SwiftPM and wrapped into a proper `.app` bundle by the
+build script (required for notification APIs). Don't use `swift run` — it
+produces a raw binary that can't register with LaunchServices.
+
 ## Tech Stack
 
 - **Language:** Swift (SwiftUI)

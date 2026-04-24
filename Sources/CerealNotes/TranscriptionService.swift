@@ -37,6 +37,7 @@ actor TranscriptionService {
     private var transcriptHandle: FileHandle?
     private var sessionStart: Date?
     private var sessionDate: Date?
+    private var rewriter: (any TranscriptRewriter)?
 
     private var micSamplesProcessed: Int = 0
     private var systemSamplesProcessed: Int = 0
@@ -132,6 +133,12 @@ actor TranscriptionService {
         nextMicVoiceNumber = 2
         pendingEntries = []
 
+        let newRewriter = TranscriptRewriterFactory.make()
+        rewriter = newRewriter
+        if let fm = newRewriter as? FoundationModelsRewriter {
+            Task.detached { await fm.prewarm() }
+        }
+
         let transcriptURL = sessionDirectory.appendingPathComponent("transcript.md")
         FileManager.default.createFile(atPath: transcriptURL.path, contents: nil)
         let handle = try FileHandle(forWritingTo: transcriptURL)
@@ -164,27 +171,35 @@ actor TranscriptionService {
     func endSession() async {
         // Flush any audio sitting in the ASR buffers into one last utterance each
         do {
-            if let micText = try await micAsr?.finish(), !micText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let midpoint = midpointTime(
-                    lastEndSamples: lastMicUtteranceEndSamples,
-                    currentSamples: micSamplesProcessed,
-                    sampleRate: micSampleRate
-                )
-                let speaker = currentMicSpeaker(at: midpoint)
-                pendingEntries.append(TranscriptEntry(speaker: speaker, text: micText, timestamp: midpoint))
+            if let micText = try await micAsr?.finish() {
+                let trimmed = micText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    let restored = await rewriter?.rewrite(trimmed) ?? trimmed
+                    let midpoint = midpointTime(
+                        lastEndSamples: lastMicUtteranceEndSamples,
+                        currentSamples: micSamplesProcessed,
+                        sampleRate: micSampleRate
+                    )
+                    let speaker = currentMicSpeaker(at: midpoint)
+                    pendingEntries.append(TranscriptEntry(speaker: speaker, text: restored, timestamp: midpoint))
+                }
             }
         } catch {
             onError?(error)
         }
         do {
-            if let sysText = try await systemAsr?.finish(), !sysText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let midpoint = midpointTime(
-                    lastEndSamples: lastSystemUtteranceEndSamples,
-                    currentSamples: systemSamplesProcessed,
-                    sampleRate: systemSampleRate
-                )
-                let speaker = currentSystemSpeaker(at: midpoint)
-                pendingEntries.append(TranscriptEntry(speaker: speaker, text: sysText, timestamp: midpoint))
+            if let sysText = try await systemAsr?.finish() {
+                let trimmed = sysText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    let restored = await rewriter?.rewrite(trimmed) ?? trimmed
+                    let midpoint = midpointTime(
+                        lastEndSamples: lastSystemUtteranceEndSamples,
+                        currentSamples: systemSamplesProcessed,
+                        sampleRate: systemSampleRate
+                    )
+                    let speaker = currentSystemSpeaker(at: midpoint)
+                    pendingEntries.append(TranscriptEntry(speaker: speaker, text: restored, timestamp: midpoint))
+                }
             }
         } catch {
             onError?(error)
@@ -211,6 +226,7 @@ actor TranscriptionService {
         transcriptHandle = nil
         sessionStart = nil
         sessionDate = nil
+        rewriter = nil
 
         // Clear any lingering live partials on consumers
         onMicPartial?("")
@@ -272,13 +288,14 @@ actor TranscriptionService {
 
         // EOU fires once per session unless we reset — do this even on empty text.
         if !trimmed.isEmpty {
+            let restored = await rewriter?.rewrite(trimmed) ?? trimmed
             let midpoint = midpointTime(
                 lastEndSamples: lastMicUtteranceEndSamples,
                 currentSamples: micSamplesProcessed,
                 sampleRate: micSampleRate
             )
             let speaker = currentMicSpeaker(at: midpoint)
-            pendingEntries.append(TranscriptEntry(speaker: speaker, text: trimmed, timestamp: midpoint))
+            pendingEntries.append(TranscriptEntry(speaker: speaker, text: restored, timestamp: midpoint))
             flushOldEntries()
         }
 
@@ -291,13 +308,14 @@ actor TranscriptionService {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if !trimmed.isEmpty {
+            let restored = await rewriter?.rewrite(trimmed) ?? trimmed
             let midpoint = midpointTime(
                 lastEndSamples: lastSystemUtteranceEndSamples,
                 currentSamples: systemSamplesProcessed,
                 sampleRate: systemSampleRate
             )
             let speaker = currentSystemSpeaker(at: midpoint)
-            pendingEntries.append(TranscriptEntry(speaker: speaker, text: trimmed, timestamp: midpoint))
+            pendingEntries.append(TranscriptEntry(speaker: speaker, text: restored, timestamp: midpoint))
             flushOldEntries()
         }
 

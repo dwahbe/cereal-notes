@@ -31,6 +31,7 @@ let package = Package(
         .testTarget(
             name: "AudioPipelineTests",
             dependencies: [
+                "CerealNotes",
                 "SystemAudioTap",
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],

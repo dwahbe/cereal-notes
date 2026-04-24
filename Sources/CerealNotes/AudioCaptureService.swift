@@ -3,6 +3,25 @@ import CoreAudio
 import ScreenCaptureKit
 import SystemAudioTap
 
+/// Which capture path this session used — reported in session diagnostics.
+enum AudioCapturePath: String, Codable {
+    case processTap
+    case screenCaptureKit
+}
+
+/// Per-stream statistics captured during the session.
+struct AudioStreamStats: Codable {
+    var bufferCount: Int = 0
+    var sampleCount: Int = 0
+    var sampleRate: Double = 0
+}
+
+struct AudioCaptureStats: Codable {
+    var path: AudioCapturePath?
+    var system = AudioStreamStats()
+    var mic = AudioStreamStats()
+}
+
 final class AudioCaptureService: NSObject, @unchecked Sendable {
     private var tapInfo = SystemAudioTapInfo(tapID: 0, aggregateDeviceID: 0)
     private var systemEngine: AVAudioEngine?
@@ -24,10 +43,19 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     private static let sampleRate: Double = 48000
     private static let channelCount: AVAudioChannelCount = 1
 
+    // Capture diagnostics — read after stopCapture() to write session.json.
+    private var stats = AudioCaptureStats()
+
+    /// Snapshot of stats since the last startCapture() call.
+    func currentStats() -> AudioCaptureStats {
+        lock.withLock { stats }
+    }
+
     // MARK: - Public API
 
     func startCapture(sessionDir: URL, onError: @escaping @Sendable (Error) -> Void) async throws {
         self.onError = onError
+        lock.withLock { stats = AudioCaptureStats() }
 
         // Request mic permission upfront — accessing AVAudioEngine.inputNode
         // without permission can crash on macOS 15+.
@@ -36,6 +64,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         if IsSystemAudioTapAvailable() {
             do {
                 try startWithProcessTap(sessionDir: sessionDir, micGranted: micGranted)
+                lock.withLock { stats.path = .processTap }
                 return
             } catch {
                 // Process tap failed — clean up partial state, fall through to SCK
@@ -43,6 +72,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
             }
         }
         try await startWithScreenCaptureKit(sessionDir: sessionDir, micGranted: micGranted)
+        lock.withLock { stats.path = .screenCaptureKit }
     }
 
     func stopCapture() async {
@@ -114,6 +144,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
 
         sysInputNode.installTap(onBus: 0, bufferSize: 4096, format: sysTapFormat) { [weak self] buffer, _ in
             self?.writeBuffer(buffer, for: \.systemAudioFile)
+            self?.recordStats(frames: Int(buffer.frameLength), rate: sysTapFormat.sampleRate, side: .system)
             if let callback = self?.onSystemAudioBuffer,
                let data = buffer.floatChannelData?[0] {
                 let samples = Array(UnsafeBufferPointer(start: data, count: Int(buffer.frameLength)))
@@ -148,6 +179,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
 
         micInputNode.installTap(onBus: 0, bufferSize: 4096, format: micTapFormat) { [weak self] buffer, _ in
             self?.writeBuffer(buffer, for: \.micAudioFile)
+            self?.recordStats(frames: Int(buffer.frameLength), rate: micTapFormat.sampleRate, side: .mic)
             if let callback = self?.onMicAudioBuffer,
                let data = buffer.floatChannelData?[0] {
                 let samples = Array(UnsafeBufferPointer(start: data, count: Int(buffer.frameLength)))
@@ -237,6 +269,23 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         }
     }
 
+    private enum StreamSide { case system, mic }
+
+    private func recordStats(frames: Int, rate: Double, side: StreamSide) {
+        lock.withLock {
+            switch side {
+            case .system:
+                stats.system.bufferCount += 1
+                stats.system.sampleCount += frames
+                stats.system.sampleRate = rate
+            case .mic:
+                stats.mic.bufferCount += 1
+                stats.mic.sampleCount += frames
+                stats.mic.sampleRate = rate
+            }
+        }
+    }
+
     /// Convert CMSampleBuffer to AVAudioPCMBuffer and write (SCK fallback only)
     private func writeSampleBuffer(
         _ sampleBuffer: CMSampleBuffer,
@@ -284,11 +333,15 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
 extension AudioCaptureService: SCStreamOutput {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard sampleBuffer.isValid else { return }
+        let frames = CMSampleBufferGetNumSamples(sampleBuffer)
+        let rate = CMAudioFormatDescriptionGetStreamBasicDescription(sampleBuffer.formatDescription!)?.pointee.mSampleRate ?? 0
         switch type {
         case .audio:
             writeSampleBuffer(sampleBuffer, to: \.systemAudioFile, callback: onSystemAudioBuffer)
+            recordStats(frames: frames, rate: rate, side: .system)
         case .microphone:
             writeSampleBuffer(sampleBuffer, to: \.micAudioFile, callback: onMicAudioBuffer)
+            recordStats(frames: frames, rate: rate, side: .mic)
         case .screen:
             break
         @unknown default:

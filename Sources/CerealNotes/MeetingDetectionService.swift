@@ -35,6 +35,9 @@ final class MeetingDetectionService {
     // Attribution is sticky while mic is continuously active — see reevaluate() notes.
     @ObservationIgnored private var lockedBundleID: String?
     @ObservationIgnored private var userRejectedThisWindow: Bool = false
+    // When true, detection is paused — used while voice enrollment holds the mic
+    // so we don't fire a phantom "meeting detected" banner from our own recording.
+    @ObservationIgnored private var isSuspended: Bool = false
 
     @ObservationIgnored private var workspaceObservers: [NSObjectProtocol] = []
     @ObservationIgnored private var currentInputDeviceID: AudioDeviceID = kAudioObjectUnknown
@@ -76,6 +79,28 @@ final class MeetingDetectionService {
         // Stay silent for the rest of this mic-active window. Don't hunt for a
         // different meeting app — mic activity is driven by the rejected one.
         userRejectedThisWindow = true
+        reevaluate()
+    }
+
+    /// Pause detection — used while voice enrollment holds the mic so we don't
+    /// trigger a false "meeting detected" prompt.
+    func suspendDetection() {
+        isSuspended = true
+        clearDetected()
+    }
+
+    /// Resume detection after `suspendDetection()`.
+    func resumeDetection() {
+        isSuspended = false
+        // CoreAudio takes a moment to report `micActive=false` after the
+        // enrollment engine stops. If we'd reevaluate right now with the mic
+        // still reported active, we'd pick whatever meeting app happens to be
+        // running and fire a false positive. Treat the remainder of this mic
+        // window as implicitly dismissed — the detector will clear the flag
+        // the next time the mic genuinely goes inactive.
+        if micActive {
+            userRejectedThisWindow = true
+        }
         reevaluate()
     }
 
@@ -289,6 +314,11 @@ final class MeetingDetectionService {
     //     prompts fire until the mic cycles (signals end-of-call).
     //   · Mic inactive is the only reset: clears lock, suppression, and rejection.
     private func reevaluate() {
+        if isSuspended {
+            clearDetected()
+            return
+        }
+
         if recordingState?.isRecording == true {
             clearDetected()
             return

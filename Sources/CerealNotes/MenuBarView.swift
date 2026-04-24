@@ -5,10 +5,20 @@ struct MenuBarView: View {
     @Environment(StorageSettings.self) private var storageSettings
     @Environment(ModelDownloadState.self) private var modelDownloadState
     @Environment(MeetingDetectionService.self) private var meetingDetectionService
+    @Environment(\.openSettings) private var openSettings
 
     private var modelsReady: Bool {
         if case .ready = modelDownloadState.status { return true }
         return false
+    }
+
+    private func showSettings() {
+        // .accessory apps don't front their Settings window automatically.
+        // Match the pattern used by StorageSettings.pickFolder(): flip to
+        // .regular, activate, then flip back once the window is dismissed.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
+        openSettings()
     }
 
     var body: some View {
@@ -35,6 +45,13 @@ struct MenuBarView: View {
                 .font(.title2)
             Text("Cereal Notes")
                 .font(.headline)
+            Spacer()
+            Button(action: showSettings) {
+                Image(systemName: "gearshape")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
         }
 
         switch modelDownloadState.status {
@@ -90,7 +107,8 @@ struct MenuBarView: View {
             Text(error)
                 .font(.caption)
                 .foregroundStyle(.red)
-                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
 
         Button(action: { storageSettings.pickFolder() }) {
@@ -131,11 +149,53 @@ struct MenuBarView: View {
             .font(.system(.title, design: .monospaced))
             .contentTransition(.numericText())
 
+        livePartialView
+
         Button(action: { recordingState.stop() }) {
             Label("Stop Recording", systemImage: "stop.circle")
                 .frame(maxWidth: .infinity)
         }
         .controlSize(.large)
         .buttonStyle(.glassProminent)
+
+        if let error = recordingState.errorMessage {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private var livePartialView: some View {
+        let mic = recordingState.livePartialMic
+        let system = recordingState.livePartialSystem
+        if !mic.isEmpty || !system.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                if !mic.isEmpty {
+                    partialLine(speaker: "You", text: mic)
+                }
+                if !system.isEmpty {
+                    partialLine(speaker: "Them", text: system)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 4)
+        }
+    }
+
+    private func partialLine(speaker: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text(speaker)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .truncationMode(.head)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }

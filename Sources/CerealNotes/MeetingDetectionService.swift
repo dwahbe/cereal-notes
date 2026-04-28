@@ -25,7 +25,6 @@ final class MeetingDetectionService {
     @ObservationIgnored var onRecordRequested: (() -> Void)?
 
     @ObservationIgnored private weak var recordingState: RecordingState?
-    @ObservationIgnored private let notifier = MeetingNotifier()
     @ObservationIgnored private let banner = MeetingBannerController()
     @ObservationIgnored private var runningMeetingApps: Set<String> = []
     @ObservationIgnored private var activationOrder: [String] = []  // most recent first
@@ -46,12 +45,6 @@ final class MeetingDetectionService {
 
     init(recordingState: RecordingState) {
         self.recordingState = recordingState
-        notifier.onRecord = { [weak self] in
-            self?.onRecordRequested?()
-        }
-        notifier.onDismiss = { [weak self] in
-            self?.dismissCurrent()
-        }
         banner.onRecord = { [weak self] in
             self?.onRecordRequested?()
         }
@@ -373,8 +366,6 @@ final class MeetingDetectionService {
         }
         if lastNotifiedBundleID != bundleID {
             lastNotifiedBundleID = bundleID
-            let notifier = self.notifier
-            Task { await notifier.notify(appName: appName, bundleIdentifier: bundleID) }
             banner.show(appName: appName)
         }
     }
@@ -385,7 +376,6 @@ final class MeetingDetectionService {
         }
         if lastNotifiedBundleID != nil {
             lastNotifiedBundleID = nil
-            notifier.cancel()
             banner.hide()
         }
     }

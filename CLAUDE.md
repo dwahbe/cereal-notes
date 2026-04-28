@@ -58,8 +58,6 @@ Sources/
     ModelDownloadState.swift          # Observable status for model prefetch
     MeetingDetectionService.swift     # Fuses NSWorkspace + CoreAudio mic signal
     MeetingBannerWindow.swift         # Floating NSPanel banner (primary prompt)
-    MeetingNotifier.swift             # Legacy UNUserNotification fallback
-                                      #   (runs in parallel with the banner)
     VoiceProfile.swift                # Profile data type (.you / .other)
     VoiceProfileStore.swift           # On-disk profile store (JSON + WAV pairs)
     VoiceEnrollmentRecorder.swift     # @Observable mic recorder used by enrollment
@@ -94,7 +92,7 @@ Tests/
 - **Meeting detection**: `MeetingDetectionService` fuses two local signals — NSWorkspace launch/terminate/activate notifications (known meeting app bundle IDs) and a CoreAudio `kAudioDevicePropertyDeviceIsRunningSomewhere` listener on the default input device (mic in use). Known bundle IDs: Zoom, Microsoft Teams (v1 + v2), FaceTime, Slack, Webex, Discord.
 - **Detection state machine — sticky attribution**: once the mic goes active, the service locks onto one bundle ID (chosen via frontmost → most-recently-activated → alphabetical fallback — never `Set.first`, which is non-deterministic). While the mic stays continuously active, frontmost/activation changes do **not** re-attribute. This prevents "Slack call detected" when Zoom warm-holds the mic at end-of-call and the user switches to Slack. If the locked app terminates mid-window, detection clears but does not hunt for a replacement. Mic inactivity is the only reset.
 - **Dismiss / Stop-while-in-call**: both flip a `userRejectedThisWindow` flag so no further prompts fire until the mic cycles (signals a new call). Stopping a recording mid-call implicitly counts as dismiss — we don't re-prompt the user who just chose to stop.
-- **Prompt surface**: `MeetingBannerController` renders a custom borderless `NSPanel` (Granola-style) in the top-right of the active screen. `.statusBar` level + `canJoinAllSpaces + fullScreenAuxiliary` collection so it floats over fullscreen Zoom and follows spaces. Auto-dismisses after 15s. `MeetingNotifier` (`UNUserNotificationCenter`) currently runs in parallel as a fallback; scheduled for removal.
+- **Prompt surface**: `MeetingBannerController` renders a custom borderless `NSPanel` (Granola-style) in the top-right of the active screen. `.statusBar` level + `canJoinAllSpaces + fullScreenAuxiliary` collection so it floats over fullscreen Zoom and follows spaces. Auto-dismisses after 15s.
 - **No networking**. Everything runs locally. Exceptions: FluidAudio model downloads from Hugging Face on first launch, and Apple's on-device Foundation Models (which may pull its base model through system channels outside the app's control).
 
 ## Design
@@ -110,7 +108,7 @@ See **[DESIGN.md](DESIGN.md)** for all frontend and design decisions (Liquid Gla
 - Audio output: timestamped session directories containing `system.wav` + `mic.wav` (48kHz mono float32) alongside a streaming `transcript.md`
 - Voice profile storage: `~/Library/Application Support/CerealNotes/voices/` — JSON + WAV pairs. Don't bake any other personal data into this directory.
 - Permissions reset when the `.app` path changes (different worktree = different path = TCC re-prompts). Expected.
-- `UNUserNotificationCenter` is wired but not the primary surface. New meeting prompts should extend `MeetingBannerController`; don't add new notification flows unless you've thought through Focus/DND filtering and notification permission UX.
+- New meeting prompts should extend `MeetingBannerController`; don't add `UNUserNotificationCenter` flows unless you've thought through Focus/DND filtering and notification permission UX.
 - Any feature that opens the mic outside a recording session must call `MeetingDetectionService.suspendDetection()` / `resumeDetection()` around its engine lifetime — otherwise it false-fires the banner.
 - Transcript post-processing (punctuation, anything else that mutates finalized text) belongs inside `TranscriptionService`'s EOU handlers, *before* `pendingEntries.append`. The 3-second flush delay (`flushOldEntries`) is enough headroom for async rewrites — do not add a separate post-write pass. Don't touch partial-transcript text; the live-partial UI is deliberately raw.
 - The test target `@testable import CerealNotes`, so keep testable code at `internal` visibility; `private` types cannot carry `@Generable` or other macro-expanded conformances (moved out of `FoundationModelsRewriter` for this reason).

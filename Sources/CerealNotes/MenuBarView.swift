@@ -34,6 +34,10 @@ struct MenuBarView: View {
             .frame(width: 280)
             .animation(.default, value: recordingState.isRecording)
         }
+        // Keep controls bright when Settings (or any other window) is key —
+        // otherwise the popover renders as an inactive window and the
+        // .glassProminent button washes out to near-white.
+        .environment(\.controlActiveState, .active)
     }
 
     // MARK: - Idle

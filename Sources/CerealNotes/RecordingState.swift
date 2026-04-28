@@ -133,12 +133,17 @@ final class RecordingState {
 
         writeSessionJSON(sessionDir: sessionDir, sessionStart: sessionStart, stats: stats)
 
-        // Warn if the system-audio side didn't produce any buffers — usually a
-        // TCC/permission problem (stale code signature after a rebuild). The
-        // mic was probably fine so the transcript isn't empty, but it's
-        // one-sided and the user should know.
-        if stats.path == .processTap, stats.system.bufferCount == 0 {
-            errorMessage = "System audio wasn't captured — only your mic was recorded. Check System Settings → Privacy & Security → System Audio Recording Only."
+        // Only warn when zero buffers arrived for a recording long enough that
+        // we'd have expected the tap to fire (~12 buffers/sec). Short test
+        // recordings or genuinely silent system output (e.g. a Zoom call with
+        // no other participants) can legitimately produce zero buffers and
+        // shouldn't trigger a permission alarm.
+        let duration = Date().timeIntervalSince(sessionStart)
+        let zeroBufferThreshold: TimeInterval = 15
+        if stats.path == .processTap,
+           stats.system.bufferCount == 0,
+           duration >= zeroBufferThreshold {
+            errorMessage = "System audio wasn't captured. If other participants were speaking, check System Settings → Privacy & Security → System Audio Recording Only."
         }
     }
 

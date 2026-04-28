@@ -20,8 +20,13 @@ pkill -f "DerivedData/.*/$APP_NAME" 2>/dev/null || true
 
 # Purge any stale Xcode DerivedData build so LaunchServices can't resolve our
 # bundle ID to it. Using Run in Xcode recreates it — avoid that and use this script.
-DERIVED_GLOB=("$HOME"/Library/Developer/Xcode/DerivedData/distracted-ride-*)
-for d in "${DERIVED_GLOB[@]}"; do
+shopt -s nullglob
+DERIVED_GLOB=(
+    "$HOME"/Library/Developer/Xcode/DerivedData/serial-notes-*
+    "$HOME"/Library/Developer/Xcode/DerivedData/distracted-ride-*
+)
+shopt -u nullglob
+for d in ${DERIVED_GLOB[@]+"${DERIVED_GLOB[@]}"}; do
     if [ -d "$d" ]; then
         /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
             -u "$d/Build/Products/Debug/" 2>/dev/null || true

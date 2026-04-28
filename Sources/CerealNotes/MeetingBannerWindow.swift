@@ -144,28 +144,40 @@ private struct MeetingBannerView: View {
     let onRecord: @MainActor () -> Void
     let onDismiss: @MainActor () -> Void
 
+    @State private var isHovering = false
+
     var body: some View {
         pill
-            .overlay(alignment: .topLeading) { dismissButton }
+            .overlay(alignment: .topLeading) {
+                dismissButton
+                    .opacity(isHovering ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.12), value: isHovering)
+                    .allowsHitTesting(isHovering)
+            }
             .padding(.top, 8)
             .padding(.leading, 8)
             .frame(width: 300, alignment: .leading)
-            .preferredColorScheme(.dark)
+            .preferredColorScheme(.light)
+            .onHover { isHovering = $0 }
     }
 
     private var pill: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 10) {
+            Image(systemName: "waveform.circle.fill")
+                .font(.system(size: 28, weight: .regular))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, .black)
+
             VStack(alignment: .leading, spacing: 2) {
                 Text("Meeting detected")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(.black)
                     .lineLimit(1)
                 Text(appName)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.black.opacity(0.6))
                     .lineLimit(1)
             }
-            .padding(.leading, 14)
             .padding(.vertical, 14)
 
             Spacer(minLength: 10)
@@ -174,15 +186,24 @@ private struct MeetingBannerView: View {
                 Label("Record", systemImage: "record.circle.fill")
                     .font(.subheadline.weight(.semibold))
                     .labelStyle(.titleAndIcon)
-                    .foregroundStyle(.black)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(Color.black))
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.white)
-            .controlSize(.regular)
-            .padding(.trailing, 6)
+            .buttonStyle(.plain)
+            .padding(.trailing, 8)
             .padding(.vertical, 6)
         }
-        .glassEffect(in: .rect(cornerRadius: 18))
+        .padding(.leading, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.black.opacity(0.08), lineWidth: 1)
+        )
     }
 
     private var dismissButton: some View {
@@ -190,7 +211,7 @@ private struct MeetingBannerView: View {
             Image(systemName: "xmark.circle.fill")
                 .font(.system(size: 18, weight: .medium))
                 .symbolRenderingMode(.palette)
-                .foregroundStyle(.white, .black.opacity(0.65))
+                .foregroundStyle(.white, .black.opacity(0.75))
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)

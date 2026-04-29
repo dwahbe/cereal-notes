@@ -45,27 +45,6 @@ struct SystemAudioTapTests {
         }
     }
 
-    @Test("Step 3: Create aggregate device from tap")
-    func step3_createAggregateDevice() throws {
-        guard IsSystemAudioTapAvailable() else { return }
-        guard let descPtr = CreateTapDescription() else { return }
-        let tapID = CreateProcessTapFromDescription(descPtr)
-        guard tapID != 0 else {
-            Issue.record("Process tap creation failed")
-            return
-        }
-        defer { AudioHardwareDestroyProcessTap(tapID) }
-
-        print("Calling CreateAggregateDeviceFromTap...")
-        let aggID = CreateAggregateDeviceFromTap(tapID)
-        print("aggregateDeviceID: \(aggID)")
-        #expect(aggID != 0, "Aggregate device ID should be non-zero")
-
-        if aggID != 0 {
-            AudioHardwareDestroyAggregateDevice(aggID)
-        }
-    }
-
     @Test("Full CreateSystemAudioTap + Destroy roundtrip")
     func fullRoundtrip() throws {
         guard IsSystemAudioTapAvailable() else { return }
@@ -74,233 +53,6 @@ struct SystemAudioTapTests {
         #expect(info.tapID != 0, "tapID should be non-zero")
         #expect(info.aggregateDeviceID != 0, "aggregateDeviceID should be non-zero")
         DestroySystemAudioTap(info)
-    }
-}
-
-@Suite("Aggregate Device — AVAudioEngine Setup", .serialized)
-struct AggregateDeviceTests {
-    @Test("AVAudioEngine inputNode has a valid audioUnit")
-    func engineInputNodeAudioUnit() {
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        #expect(inputNode.audioUnit != nil, "audioUnit should not be nil")
-    }
-
-    @Test("Can assign aggregate device to engine input")
-    func assignAggregateDevice() throws {
-        guard IsSystemAudioTapAvailable() else {
-            print("⏭ Skipping — process tap not available")
-            return
-        }
-
-        let info = CreateSystemAudioTap()
-        defer { DestroySystemAudioTap(info) }
-        #expect(info.aggregateDeviceID != 0)
-
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        guard let audioUnit = inputNode.audioUnit else {
-            Issue.record("audioUnit is nil")
-            return
-        }
-
-        var deviceID = info.aggregateDeviceID
-        let err = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        #expect(err == noErr, "AudioUnitSetProperty should succeed, got \(err)")
-    }
-
-    @Test("Aggregate device reports valid format after assignment")
-    func aggregateDeviceFormat() throws {
-        guard IsSystemAudioTapAvailable() else { return }
-
-        let info = CreateSystemAudioTap()
-        defer { DestroySystemAudioTap(info) }
-
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        guard let audioUnit = inputNode.audioUnit else {
-            Issue.record("audioUnit is nil")
-            return
-        }
-
-        var deviceID = info.aggregateDeviceID
-        let err = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard err == noErr else {
-            Issue.record("AudioUnitSetProperty failed: \(err)")
-            return
-        }
-
-        let format = inputNode.outputFormat(forBus: 0)
-        print("Aggregate device format: \(format)")
-        print("  sampleRate: \(format.sampleRate)")
-        print("  channelCount: \(format.channelCount)")
-        print("  commonFormat: \(format.commonFormat.rawValue)")
-        #expect(format.channelCount > 0, "Should have at least 1 channel")
-        #expect(format.sampleRate > 0, "Should have a positive sample rate")
-    }
-}
-
-@Suite("System Audio Engine — Tap + Start", .serialized)
-struct SystemAudioEngineTests {
-    @Test("Install tap with hardware-matching format and start engine")
-    func installTapAndStart() throws {
-        guard IsSystemAudioTapAvailable() else { return }
-
-        let info = CreateSystemAudioTap()
-        var engine: AVAudioEngine? = AVAudioEngine()
-        defer {
-            engine?.inputNode.removeTap(onBus: 0)
-            engine?.stop()
-            DestroySystemAudioTap(info)
-        }
-
-        let inputNode = engine!.inputNode
-        guard let audioUnit = inputNode.audioUnit else {
-            Issue.record("audioUnit is nil")
-            return
-        }
-
-        var deviceID = info.aggregateDeviceID
-        let err = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard err == noErr else {
-            Issue.record("AudioUnitSetProperty failed")
-            return
-        }
-
-        let hwFormat = inputNode.outputFormat(forBus: 0)
-        guard hwFormat.channelCount > 0, hwFormat.sampleRate > 0 else {
-            Issue.record("Invalid hardware format: \(hwFormat)")
-            return
-        }
-
-        // Key: use hardware sample rate (required by inputNode), mono, float32
-        let tapFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: hwFormat.sampleRate,
-            channels: 1,
-            interleaved: false
-        )!
-
-        print("Using tap format: \(tapFormat)")
-
-        var bufferCount = 0
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { buffer, time in
-            bufferCount += 1
-        }
-
-        try engine!.start()
-        print("Engine started successfully")
-
-        // Let it run briefly to confirm callbacks fire without crashing
-        Thread.sleep(forTimeInterval: 0.5)
-
-        print("Received \(bufferCount) audio buffers")
-        #expect(bufferCount > 0, "Should have received at least one audio buffer")
-
-        engine!.inputNode.removeTap(onBus: 0)
-        engine!.stop()
-        engine = nil
-    }
-
-    @Test("Install tap with MISMATCHED sample rate (expect failure, not crash)")
-    func installTapMismatchedSampleRate() throws {
-        guard IsSystemAudioTapAvailable() else { return }
-
-        let info = CreateSystemAudioTap()
-        defer { DestroySystemAudioTap(info) }
-
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        guard let audioUnit = inputNode.audioUnit else { return }
-
-        var deviceID = info.aggregateDeviceID
-        let err = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard err == noErr else { return }
-
-        let hwFormat = inputNode.outputFormat(forBus: 0)
-        // Intentionally use a DIFFERENT sample rate than hardware
-        let wrongRate: Double = hwFormat.sampleRate == 48000 ? 44100 : 48000
-        let badFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: wrongRate,
-            channels: 1,
-            interleaved: false
-        )!
-
-        print("Hardware rate: \(hwFormat.sampleRate), trying: \(wrongRate)")
-
-        // This may crash (EXC_BAD_ACCESS) or throw — the test documents which.
-        // If this test crashes, that confirms sample rate mismatch is the root cause.
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: badFormat) { _, _ in }
-        do {
-            try engine.start()
-            print("Engine started with mismatched rate (unexpected success)")
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-        } catch {
-            print("Engine start threw with mismatched rate: \(error)")
-        }
-    }
-
-    @Test("Install tap with nil format (native format)")
-    func installTapNilFormat() throws {
-        guard IsSystemAudioTapAvailable() else { return }
-
-        let info = CreateSystemAudioTap()
-        defer { DestroySystemAudioTap(info) }
-
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        guard let audioUnit = inputNode.audioUnit else { return }
-
-        var deviceID = info.aggregateDeviceID
-        _ = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-
-        // nil format = use node's native format. Safest option.
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { buffer, _ in
-            // Print format of first buffer to see what the device actually delivers
-        }
-        try engine.start()
-        Thread.sleep(forTimeInterval: 0.3)
-
-        print("Engine with nil format started OK")
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
     }
 }
 
@@ -436,86 +188,110 @@ final class TestSCStreamDelegate: NSObject, SCStreamDelegate, SCStreamOutput, @u
 
 @Suite("Full Pipeline", .serialized)
 struct FullPipelineTests {
-    @Test("System audio + mic capture writes valid WAV files")
-    func fullCapture() async throws {
+    /// End-to-end check that the system-audio IOProc path actually delivers
+    /// frames. Gated behind `CEREAL_AUDIO_INTEGRATION_TEST=1` because:
+    ///   1. `swift test` runs outside the `.app` bundle, so TCC denies the
+    ///      tap-aggregate creation — the test would always fail in CI/normal
+    ///      local runs.
+    ///   2. It requires real system audio playing during the run window to
+    ///      observe non-zero buffers.
+    /// To run this manually:
+    ///   - Grant the test binary System Audio Recording permission, or run
+    ///     it from a properly bundled `.app`.
+    ///   - Start playing audio (any source) on the default output device.
+    ///   - Run: `CEREAL_AUDIO_INTEGRATION_TEST=1 swift test --filter FullPipelineTests`
+    ///
+    /// This is the regression check that *should* have caught the AVAudioEngine
+    /// vs. raw IOProc bug (the original assertion was just `fileSize > 44`,
+    /// which a header-only WAV passes — false positive). The new assertion is
+    /// on observed buffer count, not file size.
+    @Test("System audio IOProc delivers buffers (integration)")
+    func systemAudioIOProcDeliversBuffers() async throws {
+        guard ProcessInfo.processInfo.environment["CEREAL_AUDIO_INTEGRATION_TEST"] == "1" else {
+            print("⏭ Skipping — set CEREAL_AUDIO_INTEGRATION_TEST=1 to run")
+            return
+        }
         guard IsSystemAudioTapAvailable() else {
             print("⏭ Process tap not available")
             return
         }
 
-        let micGranted = await AVCaptureDevice.requestAccess(for: .audio)
-        print("Mic granted: \(micGranted)")
-
-        let tmpDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("cereal-notes-test-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: tmpDir) }
-
         let info = CreateSystemAudioTap()
         guard info.tapID != 0, info.aggregateDeviceID != 0 else {
-            Issue.record("Process tap creation failed")
+            Issue.record("Process tap creation failed (likely TCC denied — run from a bundled .app)")
             return
         }
         defer { DestroySystemAudioTap(info) }
 
-        // System engine
-        let sysEngine = AVAudioEngine()
-        let sysInputNode = sysEngine.inputNode
-        guard let audioUnit = sysInputNode.audioUnit else {
-            Issue.record("audioUnit nil")
-            return
-        }
-
-        var deviceID = info.aggregateDeviceID
-        let err = AudioUnitSetProperty(
-            audioUnit, kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global, 0,
-            &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size)
+        // Query the aggregate's input format — same path production uses.
+        var streamFormat = AudioStreamBasicDescription()
+        var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var formatAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamFormat,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
         )
-        guard err == noErr else {
-            Issue.record("AudioUnitSetProperty failed: \(err)")
+        let formatStatus = AudioObjectGetPropertyData(
+            info.aggregateDeviceID, &formatAddr, 0, nil, &formatSize, &streamFormat)
+        guard formatStatus == noErr, streamFormat.mSampleRate > 0 else {
+            Issue.record("Failed to query aggregate input format: \(formatStatus)")
+            return
+        }
+        print("Aggregate input format: sr=\(streamFormat.mSampleRate) ch=\(streamFormat.mChannelsPerFrame)")
+
+        let counter = BufferCounter()
+        let queue = DispatchQueue(label: "test.system-ioproc", qos: .userInteractive)
+        var procID: AudioDeviceIOProcID?
+        let createStatus = AudioDeviceCreateIOProcIDWithBlock(
+            &procID,
+            info.aggregateDeviceID,
+            queue
+        ) { (_, inputData, _, _, _) in
+            let abl = inputData.pointee
+            guard abl.mNumberBuffers > 0 else { return }
+            let firstBuffer = withUnsafePointer(to: inputData.pointee.mBuffers) { $0.pointee }
+            let frames = Int(firstBuffer.mDataByteSize) / max(MemoryLayout<Float>.size, 1)
+            counter.record(frames: frames)
+        }
+        guard createStatus == noErr, let procID else {
+            Issue.record("AudioDeviceCreateIOProcIDWithBlock failed: \(createStatus)")
+            return
+        }
+        defer { AudioDeviceDestroyIOProcID(info.aggregateDeviceID, procID) }
+
+        let startStatus = AudioDeviceStart(info.aggregateDeviceID, procID)
+        guard startStatus == noErr else {
+            Issue.record("AudioDeviceStart failed: \(startStatus)")
             return
         }
 
-        let hwFormat = sysInputNode.outputFormat(forBus: 0)
-        guard hwFormat.channelCount > 0, hwFormat.sampleRate > 0 else {
-            Issue.record("Bad hw format: \(hwFormat)")
-            return
-        }
-
-        let tapFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: hwFormat.sampleRate,
-            channels: 1,
-            interleaved: false
-        )!
-
-        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-
-        let sysFile = try AVAudioFile(
-            forWriting: tmpDir.appendingPathComponent("system.wav"),
-            settings: tapFormat.settings
-        )
-
-        let lock = NSLock()
-        sysInputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { buffer, _ in
-            lock.withLock {
-                try? sysFile.write(from: buffer)
-            }
-        }
-
-        try sysEngine.start()
-        print("System engine started")
-
-        // Record for 1 second
+        // Run for 1 s — needs real audio playing on the default output device
+        // for buffers to carry non-zero samples, but the IOProc itself fires
+        // regardless of whether anything is playing.
         try await Task.sleep(for: .seconds(1))
 
-        sysEngine.inputNode.removeTap(onBus: 0)
-        sysEngine.stop()
+        AudioDeviceStop(info.aggregateDeviceID, procID)
 
-        let fileSize = try FileManager.default.attributesOfItem(
-            atPath: tmpDir.appendingPathComponent("system.wav").path
-        )[.size] as? Int ?? 0
-        print("system.wav size: \(fileSize) bytes")
-        #expect(fileSize > 44, "WAV file should have data beyond the header")
+        let (bufferCount, frameCount) = counter.snapshot()
+        print("IOProc fired \(bufferCount) times, total frames: \(frameCount)")
+        #expect(bufferCount > 0, "IOProc should have fired at least once in 1s")
+        #expect(frameCount > 0, "IOProc should have delivered at least one frame")
+    }
+}
+
+private final class BufferCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bufferCount = 0
+    private var frameCount = 0
+
+    func record(frames: Int) {
+        lock.withLock {
+            bufferCount += 1
+            frameCount += frames
+        }
+    }
+
+    func snapshot() -> (Int, Int) {
+        lock.withLock { (bufferCount, frameCount) }
     }
 }

@@ -67,13 +67,15 @@ Sources/
   SystemAudioTap/          # ObjC module wrapping CoreAudio tap API
 Tests/
   AudioPipelineTests/      # Swift test suites (swift test — no .app needed).
-                           #   Some CoreAudio tap tests fail under `swift test`
-                           #   because TCC denies system audio capture to a
-                           #   non-bundled binary. Expected; transcription,
-                           #   mic-engine, full-pipeline, and rewriter suites pass.
-    AudioPipelineTests.swift          # Capture path + aggregate device coverage
+                           #   Tap C-API + mic-engine + SCK + transcription
+                           #   suites pass under `swift test`. The system-audio
+                           #   IOProc end-to-end test is gated behind
+                           #   CEREAL_AUDIO_INTEGRATION_TEST=1 because TCC
+                           #   denies aggregate-device creation to a
+                           #   non-bundled binary.
+    AudioPipelineTests.swift          # C tap API, mic engine, SCK, IOProc integration
     CATapIntrospection.swift          # Tap descriptor + API roundtrip
-    TapDeviceTests.swift              # Process-tap device creation
+    TapDeviceTests.swift              # Process-tap device introspection
     TranscriptionTests.swift          # FluidAudio ASR + diarizer smoke tests
     TranscriptRewriterTests.swift     # Heuristic rewriter + FM smoke test
                                       #   (FM smoke test gated by CEREAL_FM_TEST=1)
@@ -83,6 +85,8 @@ Tests/
 
 - **SwiftUI** with `@Observable` (Swift 6 concurrency). All UI types are `@MainActor`.
 - **Two capture paths**: `AudioCaptureService` tries a CoreAudio process tap first (ObjC `SystemAudioTap` module), falls back to ScreenCaptureKit.
+- **System audio uses raw HAL IOProc, not AVAudioEngine**: the system path runs `AudioDeviceCreateIOProcIDWithBlock` + `AudioDeviceStart` directly on the tap-aggregate device. Do **not** revert to `AVAudioEngine.inputNode.installTap` — it goes through AUHAL, and AUHAL on a tap-aggregate device silently delivers zero buffers (engine reports running, IO proc gets created, no buffers ever fire the tap callback). The mic path stays on AVAudioEngine because the mic is a regular input device, not an aggregate.
+- **Aggregate device construction**: `SystemAudioTap.m` builds a private aggregate containing the **default output device as `kAudioAggregateDeviceMainSubDeviceKey` + `kAudioAggregateDeviceSubDeviceListKey`** plus the process tap as a sub-tap. The output device is required as the clock master — a tap-only aggregate has no clock and its IO proc never fires. The output's normal audio routing isn't disturbed; the tap just observes what's sent to it.
 - **State**: `RecordingState` owns the `AudioCaptureService` and drives the UI. `StorageSettings` manages the output directory via UserDefaults. `VoiceProfileStore` holds saved enrollment profiles.
 - **Transcription**: [FluidAudio](https://github.com/FluidInference/FluidAudio) Parakeet streaming ASR + LS-EEND DIHARD III diarizer, both on-device. Models are cached in `~/Library/Application Support/FluidAudio/Models/`. Download is kicked off at app launch from `CerealNotesApp.init` (not popover open) so the banner can record without requiring the user to open the popover first. `RecordingState.start()` also awaits `downloadModelsIfNeeded()` as a safety net — idempotent, so no double-download.
 - **Punctuation + capitalization**: Parakeet emits raw lowercase with no punctuation. `TranscriptRewriter` closes the gap: on each EOU callback, `TranscriptionService` awaits the rewriter before appending to `pendingEntries`. The production implementation (`FoundationModelsRewriter`) is an actor around Apple's on-device `LanguageModelSession` (macOS 26+) using a `@Generable` schema + 2s timeout + strict word-equality guard (lowercased-alphanumeric compare) to reject hallucinations. When Apple Intelligence is unavailable (disabled, ineligible hardware, model not ready) the factory returns `HeuristicRewriter` — capitalize first char, append `.` if missing. The rewriter only runs on finalized utterances; live-partial UI stays raw.

@@ -1,4 +1,3 @@
-import AVFoundation
 import CoreAudio
 import Foundation
 import SystemAudioTap
@@ -26,61 +25,11 @@ struct TapDeviceTests {
         // Check other properties
         let stream = desc.value(forKey: "stream") as? NSNumber
         print("stream: \(stream ?? 0)")
-        let uuid = desc.value(forKey: "UUID") as? Any
+        let uuid = desc.value(forKey: "UUID")
         print("UUID: \(String(describing: uuid))")
 
         if tapID != 0 {
             AudioHardwareDestroyProcessTap(tapID)
-        }
-    }
-
-    @Test("Try using tapID directly as audio device")
-    func tapIDAsDevice() throws {
-        guard IsSystemAudioTapAvailable() else { return }
-        guard let descPtr = CreateTapDescription() else { return }
-        let tapID = CreateProcessTapFromDescription(descPtr)
-        guard tapID != 0 else { return }
-        defer { AudioHardwareDestroyProcessTap(tapID) }
-
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        guard let audioUnit = inputNode.audioUnit else {
-            Issue.record("audioUnit nil")
-            return
-        }
-
-        // Try using the tapID directly as the device
-        var deviceID = tapID
-        let err = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global, 0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        print("Using tapID (\(tapID)) as device: status=\(err)")
-
-        if err == noErr {
-            let format = inputNode.outputFormat(forBus: 0)
-            print("Format: rate=\(format.sampleRate) ch=\(format.channelCount)")
-
-            if format.channelCount > 0 && format.sampleRate > 0 {
-                let tapFormat = AVAudioFormat(
-                    commonFormat: .pcmFormatFloat32,
-                    sampleRate: format.sampleRate,
-                    channels: 1,
-                    interleaved: false
-                )!
-                var bufferCount = 0
-                inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { _, _ in
-                    bufferCount += 1
-                }
-                try engine.start()
-                Thread.sleep(forTimeInterval: 0.5)
-                print("Received \(bufferCount) buffers via tapID-as-device")
-                engine.inputNode.removeTap(onBus: 0)
-                engine.stop()
-            }
         }
     }
 

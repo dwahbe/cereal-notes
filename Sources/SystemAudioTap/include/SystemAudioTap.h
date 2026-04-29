@@ -22,5 +22,3 @@ void DestroySystemAudioTap(SystemAudioTapInfo info);
 void *_Nullable CreateTapDescription(void);
 /// Step 2: Call AudioHardwareCreateProcessTap. Returns the tapID (0 on failure).
 AudioObjectID CreateProcessTapFromDescription(void *_Nonnull tapDescription);
-/// Step 3: Create aggregate device from a tapID. Returns the aggregate device ID.
-AudioDeviceID CreateAggregateDeviceFromTap(AudioObjectID tapID);

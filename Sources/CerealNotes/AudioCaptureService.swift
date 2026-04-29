@@ -24,7 +24,7 @@ struct AudioCaptureStats: Codable {
 
 final class AudioCaptureService: NSObject, @unchecked Sendable {
     private var tapInfo = SystemAudioTapInfo(tapID: 0, aggregateDeviceID: 0)
-    private var systemEngine: AVAudioEngine?
+    private var systemIOProcID: AudioDeviceIOProcID?
     private var micEngine: AVAudioEngine?
     private var systemAudioFile: AVAudioFile?
     private var micAudioFile: AVAudioFile?
@@ -97,62 +97,17 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     private func startWithProcessTap(sessionDir: URL, micGranted: Bool) throws {
         let info = CreateSystemAudioTap()
         guard info.tapID != 0, info.aggregateDeviceID != 0 else {
+            NSLog("[CerealNotes/Capture] processTap path: tap creation returned zero IDs — falling back")
             throw AudioCaptureError.processTapFailed
         }
         tapInfo = info
+        NSLog("[CerealNotes/Capture] processTap path: tap=\(info.tapID) agg=\(info.aggregateDeviceID)")
 
-        // --- System Audio Engine ---
-        let sysEngine = AVAudioEngine()
-        let sysInputNode = sysEngine.inputNode
-
-        guard let audioUnit = sysInputNode.audioUnit else {
-            throw AudioCaptureError.audioUnitConfigFailed
-        }
-
-        var deviceID = info.aggregateDeviceID
-        let err = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard err == noErr else {
-            throw AudioCaptureError.audioUnitConfigFailed
-        }
-
-        let sysHwFormat = sysInputNode.outputFormat(forBus: 0)
-        guard sysHwFormat.channelCount > 0, sysHwFormat.sampleRate > 0 else {
-            throw AudioCaptureError.audioUnitConfigFailed
-        }
-
-        // Use the hardware's sample rate — installTap on inputNode requires it.
-        // Only change channel count (to mono) and sample format (to float32).
-        let sysTapFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sysHwFormat.sampleRate,
-            channels: Self.channelCount,
-            interleaved: false
-        )!
-
-        let systemFile = try AVAudioFile(
-            forWriting: sessionDir.appendingPathComponent("system.wav"),
-            settings: sysTapFormat.settings
-        )
-        lock.withLock { systemAudioFile = systemFile }
-
-        sysInputNode.installTap(onBus: 0, bufferSize: 4096, format: sysTapFormat) { [weak self] buffer, _ in
-            self?.writeBuffer(buffer, for: \.systemAudioFile)
-            self?.recordStats(frames: Int(buffer.frameLength), rate: sysTapFormat.sampleRate, side: .system)
-            if let callback = self?.onSystemAudioBuffer,
-               let data = buffer.floatChannelData?[0] {
-                let samples = Array(UnsafeBufferPointer(start: data, count: Int(buffer.frameLength)))
-                callback(samples, sysTapFormat.sampleRate)
-            }
-        }
-        try sysEngine.start()
-        systemEngine = sysEngine
+        // --- System Audio via raw AudioDeviceIOProc ---
+        // AVAudioEngine + installTap doesn't reliably surface sub-tap audio
+        // from a tap-aggregate device on macOS 14+. Use a raw IOProc so the
+        // audio HAL delivers buffers directly.
+        try startSystemAudioIOProc(sessionDir: sessionDir, aggDeviceID: info.aggregateDeviceID)
 
         // --- Microphone Engine (optional — skip if permission denied) ---
         guard micGranted else { return }
@@ -188,6 +143,119 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         }
         try micEng.start()
         micEngine = micEng
+    }
+
+    // MARK: - System Audio IOProc (raw HAL — bypasses AVAudioEngine)
+
+    private func startSystemAudioIOProc(sessionDir: URL, aggDeviceID: AudioDeviceID) throws {
+        // Query the aggregate's input stream format so we know the rate the
+        // tap is delivering at. The format is determined by the tap + clock
+        // sub-device.
+        var streamFormat = AudioStreamBasicDescription()
+        var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var formatAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamFormat,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let formatStatus = AudioObjectGetPropertyData(
+            aggDeviceID, &formatAddr, 0, nil, &formatSize, &streamFormat)
+        guard formatStatus == noErr, streamFormat.mSampleRate > 0, streamFormat.mChannelsPerFrame > 0 else {
+            NSLog("[CerealNotes/Capture] failed to query agg input format status=\(formatStatus) sr=\(streamFormat.mSampleRate) ch=\(streamFormat.mChannelsPerFrame)")
+            throw AudioCaptureError.audioUnitConfigFailed
+        }
+        let sourceSampleRate = streamFormat.mSampleRate
+        let sourceChannels = AVAudioChannelCount(streamFormat.mChannelsPerFrame)
+        let sourceIsInterleaved = (streamFormat.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
+        NSLog("[CerealNotes/Capture] agg input format sr=\(sourceSampleRate) ch=\(sourceChannels) interleaved=\(sourceIsInterleaved) flags=\(streamFormat.mFormatFlags)")
+
+        // Write file format: mono float32 at the source rate.
+        let writeFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sourceSampleRate,
+            channels: 1,
+            interleaved: false
+        )!
+
+        let systemFile = try AVAudioFile(
+            forWriting: sessionDir.appendingPathComponent("system.wav"),
+            settings: writeFormat.settings
+        )
+        lock.withLock { systemAudioFile = systemFile }
+
+        // Per-cycle conversion buffer — sized for max expected frames.
+        // The HAL block fires with whatever the device's IO block size is
+        // (commonly 512–4096 frames).
+        let pcmCapacity: AVAudioFrameCount = 8192
+
+        let ioQueue = DispatchQueue(label: "com.cerealnotes.system-ioproc", qos: .userInteractive)
+
+        var procID: AudioDeviceIOProcID?
+        let createStatus = AudioDeviceCreateIOProcIDWithBlock(
+            &procID,
+            aggDeviceID,
+            ioQueue
+        ) { [weak self] (_, inputData, _, _, _) in
+            guard let self else { return }
+            let abl = inputData.pointee
+            guard abl.mNumberBuffers > 0 else { return }
+            let firstBuffer = withUnsafePointer(to: inputData.pointee.mBuffers) { $0.pointee }
+            guard let mData = firstBuffer.mData else { return }
+            let channels = max(Int(firstBuffer.mNumberChannels), 1)
+            let bytesPerFrame = MemoryLayout<Float>.size * (sourceIsInterleaved ? channels : 1)
+            let totalBytes = Int(firstBuffer.mDataByteSize)
+            let frameCount = totalBytes / max(bytesPerFrame, 1)
+            guard frameCount > 0 else { return }
+
+            guard let pcm = AVAudioPCMBuffer(pcmFormat: writeFormat, frameCapacity: pcmCapacity) else { return }
+            let writeFrames = min(frameCount, Int(pcmCapacity))
+            pcm.frameLength = AVAudioFrameCount(writeFrames)
+            guard let dest = pcm.floatChannelData?[0] else { return }
+
+            let src = mData.bindMemory(to: Float.self, capacity: frameCount * channels)
+            if channels == 1 {
+                dest.update(from: src, count: writeFrames)
+            } else if sourceIsInterleaved {
+                // Mix interleaved multichannel down to mono by averaging.
+                for f in 0..<writeFrames {
+                    var sum: Float = 0
+                    for c in 0..<channels {
+                        sum += src[f * channels + c]
+                    }
+                    dest[f] = sum / Float(channels)
+                }
+            } else {
+                // Non-interleaved: each channel is in its own AudioBuffer; use buffer 0
+                // as the mono source. (Common for taps; we got here because numBuffers
+                // > 1 wasn't iterated. Treat as mono passthrough.)
+                dest.update(from: src, count: writeFrames)
+            }
+
+            let isFirst = lock.withLock { stats.system.bufferCount == 0 }
+            if isFirst {
+                NSLog("[CerealNotes/Capture] system IOProc FIRST buffer frames=\(writeFrames) sr=\(sourceSampleRate)")
+            }
+            writeBuffer(pcm, for: \.systemAudioFile)
+            recordStats(frames: writeFrames, rate: sourceSampleRate, side: .system)
+            if let callback = onSystemAudioBuffer {
+                let samples = Array(UnsafeBufferPointer(start: dest, count: writeFrames))
+                callback(samples, sourceSampleRate)
+            }
+        }
+        guard createStatus == noErr, let procID else {
+            NSLog("[CerealNotes/Capture] AudioDeviceCreateIOProcIDWithBlock failed status=\(createStatus)")
+            throw AudioCaptureError.audioUnitConfigFailed
+        }
+        systemIOProcID = procID
+
+        let startStatus = AudioDeviceStart(aggDeviceID, procID)
+        guard startStatus == noErr else {
+            NSLog("[CerealNotes/Capture] AudioDeviceStart failed status=\(startStatus)")
+            AudioDeviceDestroyIOProcID(aggDeviceID, procID)
+            systemIOProcID = nil
+            throw AudioCaptureError.audioUnitConfigFailed
+        }
+        NSLog("[CerealNotes/Capture] system IOProc started on aggDevice=\(aggDeviceID)")
     }
 
     // MARK: - ScreenCaptureKit Fallback
@@ -242,9 +310,11 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     // MARK: - Cleanup
 
     private func cleanupEngines() {
-        systemEngine?.inputNode.removeTap(onBus: 0)
-        systemEngine?.stop()
-        systemEngine = nil
+        if let procID = systemIOProcID, tapInfo.aggregateDeviceID != 0 {
+            AudioDeviceStop(tapInfo.aggregateDeviceID, procID)
+            AudioDeviceDestroyIOProcID(tapInfo.aggregateDeviceID, procID)
+        }
+        systemIOProcID = nil
 
         micEngine?.inputNode.removeTap(onBus: 0)
         micEngine?.stop()

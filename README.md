@@ -1,4 +1,4 @@
-# Cereal Notes
+# Serial Notes
 
 A minimal macOS menu bar app that captures meeting audio, transcribes it locally, and exports clean Markdown to the notes app of your choice.
 

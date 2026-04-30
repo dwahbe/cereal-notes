@@ -8,7 +8,7 @@ A minimal macOS menu bar app that captures meeting audio, transcribes it locally
 
 1. **Hidden.** Doesn't bother the user and doesn't show up in meeting apps.
 2. **Safe.** Data never leaves your laptop unless you want it to.
-3. **Simple.** Cereal produces a high quality meeting transcript. What you do with it afterwards is up to you.
+3. **Simple.** Serial Notes produces a high quality meeting transcript. What you do with it afterwards is up to you.
 
 ## How It Works
 
@@ -35,7 +35,7 @@ duration: 47m
 Each session lives in its own folder:
 
 ```
-~/Cereal Notes/2026-04-24 at 10.00.00 AM/
+~/Serial Notes/2026-04-24 at 10.00.00 AM/
 ├── transcript.md     # what you share
 ├── system.wav        # raw meeting-side audio
 └── mic.wav           # raw mic audio

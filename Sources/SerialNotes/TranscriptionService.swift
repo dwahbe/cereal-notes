@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import FluidAudio
 import Foundation
 
@@ -8,63 +8,54 @@ actor TranscriptionService {
     /// Called when a transcription error occurs. Delivered off-main; caller hops to main if needed.
     var onError: (@Sendable (Error) -> Void)?
 
-    /// Called with the current in-progress partial transcript for the mic stream.
-    /// Empty string means "clear the live text" (after an utterance is finalized).
-    var onMicPartial: (@Sendable (String) -> Void)?
-
-    /// Called with the current in-progress partial transcript for the system-audio stream.
-    var onSystemPartial: (@Sendable (String) -> Void)?
-
-    func setCallbacks(
-        onError: (@Sendable (Error) -> Void)?,
-        onMicPartial: (@Sendable (String) -> Void)?,
-        onSystemPartial: (@Sendable (String) -> Void)?
-    ) {
+    func setCallbacks(onError: (@Sendable (Error) -> Void)?) {
         self.onError = onError
-        self.onMicPartial = onMicPartial
-        self.onSystemPartial = onSystemPartial
     }
 
     // MARK: - FluidAudio components
 
-    private var micAsr: StreamingEouAsrManager?
-    private var systemAsr: StreamingEouAsrManager?
-    private var systemDiarizer: LSEENDDiarizer?
-    private var micDiarizer: LSEENDDiarizer?
+    private var sideStates: [AudioSide: SideState] = [
+        .mic: SideState(),
+        .system: SideState()
+    ]
 
     // MARK: - Session state
 
     private var transcriptHandle: FileHandle?
     private var sessionStart: Date?
     private var sessionDate: Date?
+    private var sessionDirectory: URL?
     private var rewriter: (any TranscriptRewriter)?
-
-    private var micSamplesProcessed: Int = 0
-    private var systemSamplesProcessed: Int = 0
-    private var micSampleRate: Double = 0
-    private var systemSampleRate: Double = 0
-
-    // Utterance boundaries (sample-count at time EOU fired) — used to estimate
-    // utterance midpoints for diarizer lookup instead of biasing toward EOU time.
-    private var lastMicUtteranceEndSamples: Int = 0
-    private var lastSystemUtteranceEndSamples: Int = 0
-
-    // Speaker label maps, keyed separately for mic vs system so indexes don't collide.
-    private var systemSpeakerLabels: [Int: String] = [:]
-    private var micSpeakerLabels: [Int: String] = [:]
-    private var nextSystemPersonNumber = 1
-    private var micSeenPrimarySpeaker = false
-    private var nextMicVoiceNumber = 2
+    private var activeSessionID: UUID?
+    private var activeRewriteTaskCount = 0
+    /// Timestamps of utterances whose rewrite is still in flight. `flushOldEntries`
+    /// will not advance past the minimum value here, so a slow rewrite for an
+    /// older utterance can still land in `pendingEntries` before its slot flushes.
+    private var inflightRewriteTimestamps: [TimeInterval] = []
+    private var rewriteDrainContinuations: [CheckedContinuation<Void, Never>] = []
+    private var cachedFinalAsrModels: AsrModels?
+    private var finalAsrModelsTask: Task<AsrModels, Error>?
 
     private var pendingEntries: [TranscriptEntry] = []
+    private var streamingEchoContext = EchoSuppressionContext()
+    private var streamingEntryCount = 0
+    private var streamingEntrySources = Set<AudioSide>()
+    private var lastFlushedTimestamp: TimeInterval = 0
     private static let flushDelaySeconds: TimeInterval = 3.0
+    private static let echoSuppressionLookbackSeconds: TimeInterval = 30 * 60
+    private static let maxEchoSuppressionSystemEntries = 64
+    private static let minimumFinalAudioDuration: TimeInterval = 1.0
+    private static let diarizerProcessInterval: TimeInterval = 0.75
 
     private var modelsLoaded = false
 
     // MARK: - Model Lifecycle
 
     func downloadModelsIfNeeded() async throws {
-        guard !modelsLoaded else { return }
+        guard !modelsLoaded else {
+            prefetchFinalAsrModelsIfNeeded()
+            return
+        }
 
         let micManager = StreamingEouAsrManager()
         let sysManager = StreamingEouAsrManager()
@@ -76,11 +67,12 @@ actor TranscriptionService {
         let micDia = LSEENDDiarizer()
         try await micDia.initialize()
 
-        micAsr = micManager
-        systemAsr = sysManager
-        systemDiarizer = sysDia
-        micDiarizer = micDia
+        sideStates[.mic]?.asr = micManager
+        sideStates[.system]?.asr = sysManager
+        sideStates[.mic]?.diarizer = micDia
+        sideStates[.system]?.diarizer = sysDia
         modelsLoaded = true
+        prefetchFinalAsrModelsIfNeeded()
     }
 
     // MARK: - Session Lifecycle
@@ -94,18 +86,19 @@ actor TranscriptionService {
             throw TranscriptionError.modelsNotLoaded
         }
 
-        await micAsr?.reset()
-        await systemAsr?.reset()
-        systemDiarizer?.reset()
-        micDiarizer?.reset()
+        for side in AudioSide.allCases {
+            await sideStates[side]?.asr?.reset()
+            sideStates[side]?.diarizer?.reset()
+            sideStates[side]?.resetSession()
+        }
+        activeSessionID = UUID()
+        activeRewriteTaskCount = 0
+        inflightRewriteTimestamps.removeAll()
+        resumeRewriteDrainContinuations()
 
         // Prime diarizers with saved voice profiles so known speakers get named.
         for clip in enrollments {
-            let diarizer: LSEENDDiarizer?
-            switch clip.side {
-            case .mic: diarizer = micDiarizer
-            case .system: diarizer = systemDiarizer
-            }
+            let diarizer = sideStates[clip.side]?.diarizer
             do {
                 _ = try diarizer?.enrollSpeaker(
                     withSamples: clip.samples,
@@ -120,18 +113,12 @@ actor TranscriptionService {
 
         self.sessionStart = sessionStart
         self.sessionDate = sessionStart
-        micSamplesProcessed = 0
-        systemSamplesProcessed = 0
-        micSampleRate = 0
-        systemSampleRate = 0
-        lastMicUtteranceEndSamples = 0
-        lastSystemUtteranceEndSamples = 0
-        systemSpeakerLabels = [:]
-        micSpeakerLabels = [:]
-        nextSystemPersonNumber = 1
-        micSeenPrimarySpeaker = false
-        nextMicVoiceNumber = 2
+        self.sessionDirectory = sessionDirectory
         pendingEntries = []
+        streamingEchoContext.reset()
+        streamingEntryCount = 0
+        streamingEntrySources = []
+        lastFlushedTimestamp = 0
 
         let newRewriter = TranscriptRewriterFactory.make()
         rewriter = newRewriter
@@ -150,70 +137,55 @@ actor TranscriptionService {
         handle.write(Data(header.utf8))
 
         // ASR callbacks
+        let micAsr = sideStates[.mic]?.asr
+        let systemAsr = sideStates[.system]?.asr
         await micAsr?.setEouCallback { [weak self] text in
             guard let self else { return }
-            Task { await self.handleMicUtterance(text) }
-        }
-        await micAsr?.setPartialCallback { [weak self] text in
-            guard let self else { return }
-            Task { await self.forwardMicPartial(text) }
+            Task { await self.handleUtterance(text, source: .mic) }
         }
         await systemAsr?.setEouCallback { [weak self] text in
             guard let self else { return }
-            Task { await self.handleSystemUtterance(text) }
-        }
-        await systemAsr?.setPartialCallback { [weak self] text in
-            guard let self else { return }
-            Task { await self.forwardSystemPartial(text) }
+            Task { await self.handleUtterance(text, source: .system) }
         }
     }
 
     func endSession() async {
-        // Flush any audio sitting in the ASR buffers into one last utterance each
-        do {
-            if let micText = try await micAsr?.finish() {
-                let trimmed = micText.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    let restored = await rewriter?.rewrite(trimmed) ?? trimmed
-                    let midpoint = midpointTime(
-                        lastEndSamples: lastMicUtteranceEndSamples,
-                        currentSamples: micSamplesProcessed,
-                        sampleRate: micSampleRate
-                    )
-                    let speaker = currentMicSpeaker(at: midpoint)
-                    pendingEntries.append(TranscriptEntry(speaker: speaker, text: restored, timestamp: midpoint))
+        for side in AudioSide.allCases {
+            do {
+                if let text = try await sideStates[side]?.asr?.finish() {
+                    enqueueFinalUtterance(text, source: side)
                 }
+            } catch {
+                onError?(error)
             }
-        } catch {
-            onError?(error)
-        }
-        do {
-            if let sysText = try await systemAsr?.finish() {
-                let trimmed = sysText.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    let restored = await rewriter?.rewrite(trimmed) ?? trimmed
-                    let midpoint = midpointTime(
-                        lastEndSamples: lastSystemUtteranceEndSamples,
-                        currentSamples: systemSamplesProcessed,
-                        sampleRate: systemSampleRate
-                    )
-                    let speaker = currentSystemSpeaker(at: midpoint)
-                    pendingEntries.append(TranscriptEntry(speaker: speaker, text: restored, timestamp: midpoint))
-                }
-            }
-        } catch {
-            onError?(error)
         }
 
-        _ = try? systemDiarizer?.finalizeSession()
-        _ = try? micDiarizer?.finalizeSession()
+        await drainRewriteTasks()
+        for side in AudioSide.allCases {
+            _ = try? sideStates[side]?.diarizer?.process()
+            _ = try? sideStates[side]?.diarizer?.finalizeSession()
+        }
 
         flushAllEntries()
 
-        // Rewrite header with real duration
-        if let handle = transcriptHandle, let start = sessionStart {
-            let duration = Date().timeIntervalSince(start)
-            let finalHeader = TranscriptFormatter.header(date: sessionDate ?? start, duration: duration)
+        let duration = sessionStart.map { Date().timeIntervalSince($0) } ?? 0
+        let finalHeader = TranscriptFormatter.header(date: sessionDate ?? sessionStart ?? Date(), duration: duration)
+
+        let replacedWithHighAccuracyTranscript = await replaceTranscriptWithHighAccuracyVersion(header: finalHeader)
+
+        // Rewrite header with real duration when we keep the streaming transcript.
+        guard !replacedWithHighAccuracyTranscript else {
+            transcriptHandle = nil
+            sessionStart = nil
+            sessionDate = nil
+            sessionDirectory = nil
+            rewriter = nil
+            activeSessionID = nil
+
+            return
+        }
+
+        if let handle = transcriptHandle {
             do {
                 try handle.seek(toOffset: 0)
                 handle.write(Data(finalHeader.utf8))
@@ -226,134 +198,165 @@ actor TranscriptionService {
         transcriptHandle = nil
         sessionStart = nil
         sessionDate = nil
+        sessionDirectory = nil
         rewriter = nil
+        activeSessionID = nil
 
-        // Clear any lingering live partials on consumers
-        onMicPartial?("")
-        onSystemPartial?("")
     }
 
     // MARK: - Audio Input
 
-    func processMicAudio(_ samples: [Float], sampleRate: Double) async {
-        guard let asr = micAsr else { return }
-        if micSampleRate == 0 { micSampleRate = sampleRate }
-        guard let buffer = makePCMBuffer(samples: samples, sampleRate: sampleRate) else { return }
-
-        micSamplesProcessed += samples.count
-
-        do {
-            _ = try await asr.process(audioBuffer: buffer)
-        } catch {
-            onError?(error)
-        }
-
-        if let diarizer = micDiarizer {
-            do {
-                try diarizer.addAudio(samples, sourceSampleRate: sampleRate)
-                _ = try diarizer.process()
-            } catch {
-                onError?(error)
-            }
-        }
+    func processMicAudio(_ captured: CapturedAudioBuffer) async {
+        await processAudio(captured, source: .mic)
     }
 
-    func processSystemAudio(_ samples: [Float], sampleRate: Double) async {
-        guard let asr = systemAsr else { return }
-        if systemSampleRate == 0 { systemSampleRate = sampleRate }
-        guard let buffer = makePCMBuffer(samples: samples, sampleRate: sampleRate) else { return }
+    func processSystemAudio(_ captured: CapturedAudioBuffer) async {
+        await processAudio(captured, source: .system)
+    }
 
-        systemSamplesProcessed += samples.count
+    private func processAudio(_ captured: CapturedAudioBuffer, source: AudioSide) async {
+        let state = sideState(for: source)
+        guard let asr = state.asr else { return }
+        let buffer = captured.buffer
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return }
+        let sampleRate = buffer.format.sampleRate
+
+        if state.sampleRate == 0 { state.sampleRate = sampleRate }
+        state.samplesProcessed += frameCount
+
+        if let diarizer = state.diarizer {
+            do {
+                try addAudio(buffer, to: diarizer, sourceSampleRate: sampleRate)
+                state.diarizerSamplesSinceProcess += frameCount
+                if shouldProcessDiarizer(samplesSinceProcess: state.diarizerSamplesSinceProcess, sampleRate: sampleRate) {
+                    _ = try diarizer.process()
+                    state.diarizerSamplesSinceProcess = 0
+                }
+            } catch {
+                onError?(error)
+            }
+        }
 
         do {
             _ = try await asr.process(audioBuffer: buffer)
         } catch {
             onError?(error)
-        }
-
-        if let diarizer = systemDiarizer {
-            do {
-                try diarizer.addAudio(samples, sourceSampleRate: sampleRate)
-                _ = try diarizer.process()
-            } catch {
-                onError?(error)
-            }
         }
     }
 
     // MARK: - EOU Handlers
 
-    private func handleMicUtterance(_ text: String) async {
+    private func handleUtterance(_ text: String, source: AudioSide) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // EOU fires once per session unless we reset — do this even on empty text.
-        if !trimmed.isEmpty {
-            let restored = await rewriter?.rewrite(trimmed) ?? trimmed
-            let midpoint = midpointTime(
-                lastEndSamples: lastMicUtteranceEndSamples,
-                currentSamples: micSamplesProcessed,
-                sampleRate: micSampleRate
-            )
-            let speaker = currentMicSpeaker(at: midpoint)
-            pendingEntries.append(TranscriptEntry(speaker: speaker, text: restored, timestamp: midpoint))
-            flushOldEntries()
-        }
-
-        lastMicUtteranceEndSamples = micSamplesProcessed
-        onMicPartial?("")
-        await micAsr?.reset()
-    }
-
-    private func handleSystemUtterance(_ text: String) async {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let state = sideState(for: source)
+        let currentSamples = state.samplesProcessed
+        let previousEndSamples = state.lastUtteranceEndSamples
+        state.lastUtteranceEndSamples = currentSamples
+        let sampleRate = state.sampleRate
+        let asr = state.asr
+        await asr?.reset()
 
         if !trimmed.isEmpty {
-            let restored = await rewriter?.rewrite(trimmed) ?? trimmed
             let midpoint = midpointTime(
-                lastEndSamples: lastSystemUtteranceEndSamples,
-                currentSamples: systemSamplesProcessed,
-                sampleRate: systemSampleRate
+                lastEndSamples: previousEndSamples,
+                currentSamples: currentSamples,
+                sampleRate: sampleRate
             )
-            let speaker = currentSystemSpeaker(at: midpoint)
-            pendingEntries.append(TranscriptEntry(speaker: speaker, text: restored, timestamp: midpoint))
-            flushOldEntries()
+            let speaker = currentSpeaker(for: source, at: midpoint)
+            enqueueRewrittenEntry(source: source, speaker: speaker, text: trimmed, timestamp: midpoint)
         }
-
-        lastSystemUtteranceEndSamples = systemSamplesProcessed
-        onSystemPartial?("")
-        await systemAsr?.reset()
     }
 
-    private func forwardMicPartial(_ text: String) {
-        onMicPartial?(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    private func enqueueFinalUtterance(_ text: String, source: AudioSide) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let previousEndSamples: Int
+        let currentSamples: Int
+        let sampleRate: Double
+        let state = sideState(for: source)
+        previousEndSamples = state.lastUtteranceEndSamples
+        currentSamples = state.samplesProcessed
+        sampleRate = state.sampleRate
+        state.lastUtteranceEndSamples = currentSamples
+
+        let midpoint = midpointTime(
+            lastEndSamples: previousEndSamples,
+            currentSamples: currentSamples,
+            sampleRate: sampleRate
+        )
+        let speaker = currentSpeaker(for: source, at: midpoint)
+        enqueueRewrittenEntry(source: source, speaker: speaker, text: trimmed, timestamp: midpoint)
     }
 
-    private func forwardSystemPartial(_ text: String) {
-        onSystemPartial?(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    private func enqueueRewrittenEntry(
+        source: AudioSide,
+        speaker: String,
+        text: String,
+        timestamp: TimeInterval
+    ) {
+        guard let sessionID = activeSessionID else { return }
+        let rewriter = rewriter
+        activeRewriteTaskCount += 1
+        inflightRewriteTimestamps.append(timestamp)
+        Task.detached { [weak self] in
+            let restored = await rewriter?.rewrite(text) ?? text
+            let entry = TranscriptEntry(source: source, speaker: speaker, text: restored, timestamp: timestamp)
+            await self?.appendRewrittenEntry(entry, sessionID: sessionID)
+            await self?.rewriteTaskFinished(sessionID: sessionID)
+        }
+    }
+
+    private func appendRewrittenEntry(_ entry: TranscriptEntry, sessionID: UUID) {
+        // Stale rewrite from a prior session: its tracker was already wiped by
+        // startSession's removeAll. Don't remove anything here — a same-valued
+        // timestamp in the new session would otherwise have its slot stolen.
+        guard sessionID == activeSessionID else { return }
+        if let idx = inflightRewriteTimestamps.firstIndex(of: entry.timestamp) {
+            inflightRewriteTimestamps.remove(at: idx)
+        }
+        // Defensive — with the in-flight floor in flushOldEntries, this guard
+        // should be unreachable. Keep it as belt-and-braces so a regression can't
+        // double-write.
+        guard entry.timestamp >= lastFlushedTimestamp else { return }
+        pendingEntries.append(entry)
+        flushOldEntries()
+    }
+
+    private func drainRewriteTasks() async {
+        guard activeRewriteTaskCount > 0 else { return }
+        await withCheckedContinuation { continuation in
+            rewriteDrainContinuations.append(continuation)
+        }
+    }
+
+    private func rewriteTaskFinished(sessionID: UUID) {
+        guard sessionID == activeSessionID else { return }
+        activeRewriteTaskCount = max(0, activeRewriteTaskCount - 1)
+        guard activeRewriteTaskCount == 0 else { return }
+        resumeRewriteDrainContinuations()
+    }
+
+    private func resumeRewriteDrainContinuations() {
+        let continuations = rewriteDrainContinuations
+        rewriteDrainContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume()
+        }
     }
 
     // MARK: - Speaker Lookup
 
-    private func currentSystemSpeaker(at time: TimeInterval) -> String {
-        guard let diarizer = systemDiarizer else {
-            return labelForSystemSpeaker(0)
+    private func currentSpeaker(for source: AudioSide, at time: TimeInterval) -> String {
+        guard let diarizer = sideStates[source]?.diarizer else {
+            return labelForSpeaker(0, source: source)
         }
         if let (idx, name) = speakerInfo(in: diarizer, at: time) {
             if let name, !name.isEmpty { return name }
-            return labelForSystemSpeaker(idx)
+            return labelForSpeaker(idx, source: source)
         }
-        return labelForSystemSpeaker(0)
-    }
-
-    private func currentMicSpeaker(at time: TimeInterval) -> String {
-        guard let diarizer = micDiarizer else {
-            return labelForMicSpeaker(0)
-        }
-        if let (idx, name) = speakerInfo(in: diarizer, at: time) {
-            if let name, !name.isEmpty { return name }
-            return labelForMicSpeaker(idx)
-        }
-        return labelForMicSpeaker(0)
+        return labelForSpeaker(0, source: source)
     }
 
     /// Find the diarizer's best guess of who was speaking at `time`, along with
@@ -383,37 +386,42 @@ actor TranscriptionService {
         return bestMatch.map { ($0.index, $0.name) }
     }
 
-    private func labelForSystemSpeaker(_ speakerIndex: Int) -> String {
-        if let label = systemSpeakerLabels[speakerIndex] { return label }
-        let label = "Person \(nextSystemPersonNumber)"
-        nextSystemPersonNumber += 1
-        systemSpeakerLabels[speakerIndex] = label
-        return label
-    }
+    private func labelForSpeaker(_ speakerIndex: Int, source: AudioSide) -> String {
+        let state = sideState(for: source)
+        if let label = state.speakerLabels[speakerIndex] { return label }
 
-    /// First mic speaker encountered → "You". Additional mic speakers → "Voice 2", "Voice 3", …
-    private func labelForMicSpeaker(_ speakerIndex: Int) -> String {
-        if let label = micSpeakerLabels[speakerIndex] { return label }
         let label: String
-        if !micSeenPrimarySpeaker {
-            label = "You"
-            micSeenPrimarySpeaker = true
-        } else {
-            label = "Voice \(nextMicVoiceNumber)"
-            nextMicVoiceNumber += 1
+        switch source {
+        case .system:
+            label = "Person \(state.nextSystemPersonNumber)"
+            state.nextSystemPersonNumber += 1
+        case .mic:
+            if !state.micSeenPrimarySpeaker {
+                label = "You"
+                state.micSeenPrimarySpeaker = true
+            } else {
+                label = "Voice \(state.nextMicVoiceNumber)"
+                state.nextMicVoiceNumber += 1
+            }
         }
-        micSpeakerLabels[speakerIndex] = label
+
+        state.speakerLabels[speakerIndex] = label
         return label
     }
 
     // MARK: - Transcript Flushing
 
     private func flushOldEntries() {
-        guard let latest = pendingEntries.map(\.timestamp).max() else { return }
-        let cutoff = latest - Self.flushDelaySeconds
+        let cutoff = max(lastFlushedTimestamp, currentAudioTime() - Self.flushDelaySeconds)
+        // Hold back any entry at or after the earliest in-flight rewrite's timestamp
+        // — otherwise the rewrite, when it eventually arrives, would be silently
+        // dropped by writeEntries' `>= lastFlushedTimestamp` guard.
+        let inflightFloor = inflightRewriteTimestamps.min() ?? .greatestFiniteMagnitude
 
-        let ready = pendingEntries.filter { $0.timestamp <= cutoff }.sorted()
-        pendingEntries.removeAll { $0.timestamp <= cutoff }
+        let ready = pendingEntries
+            .filter { $0.timestamp <= cutoff && $0.timestamp < inflightFloor }
+            .sorted()
+        pendingEntries.removeAll { $0.timestamp <= cutoff && $0.timestamp < inflightFloor }
 
         writeEntries(ready)
     }
@@ -426,17 +434,245 @@ actor TranscriptionService {
 
     private func writeEntries(_ entries: [TranscriptEntry]) {
         guard let handle = transcriptHandle else { return }
+        var data = Data()
+        var newestProcessedTimestamp = lastFlushedTimestamp
         for entry in entries {
+            guard entry.timestamp >= lastFlushedTimestamp else { continue }
+            newestProcessedTimestamp = max(newestProcessedTimestamp, entry.timestamp)
+            guard shouldWriteEntry(entry) else { continue }
             let line = TranscriptFormatter.entry(
                 speaker: entry.speaker,
                 timestamp: entry.timestamp,
                 text: entry.text
             )
-            handle.write(Data(line.utf8))
+            data.append(Data(line.utf8))
+            streamingEntryCount += 1
+            streamingEntrySources.insert(entry.source)
+        }
+        if !data.isEmpty {
+            handle.write(data)
+        }
+        lastFlushedTimestamp = newestProcessedTimestamp
+    }
+
+    private func replaceTranscriptWithHighAccuracyVersion(header: String) async -> Bool {
+        guard let sessionDirectory else { return false }
+
+        do {
+            let entries = try await highAccuracyTranscriptEntries(sessionDirectory: sessionDirectory)
+            guard !entries.isEmpty else { return false }
+
+            let rendered = renderTranscript(header: header, entries: entries)
+            guard rendered.entryCount > 0, rendered.text != header else { return false }
+            guard shouldReplaceStreamingTranscript(with: rendered) else {
+                NSLog("[SerialNotes/Transcription] keeping streaming transcript because final pass missed a recorded source")
+                return false
+            }
+
+            try transcriptHandle?.close()
+            transcriptHandle = nil
+
+            let transcriptURL = sessionDirectory.appendingPathComponent("transcript.md")
+            try rendered.text.write(to: transcriptURL, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            NSLog("[SerialNotes/Transcription] high-accuracy final transcript skipped: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func highAccuracyTranscriptEntries(sessionDirectory: URL) async throws -> [TranscriptEntry] {
+        let models = try await finalAsrModels()
+
+        let micURL = sessionDirectory.appendingPathComponent("mic.wav")
+        let systemURL = sessionDirectory.appendingPathComponent("system.wav")
+        async let micEntries = highAccuracyEntriesIfPresent(
+            from: micURL,
+            models: models,
+            asrSource: .microphone,
+            transcriptSource: .mic
+        )
+        async let systemEntries = highAccuracyEntriesIfPresent(
+            from: systemURL,
+            models: models,
+            asrSource: .system,
+            transcriptSource: .system
+        )
+
+        let entries = try await (micEntries, systemEntries)
+        return (entries.0 + entries.1).sorted()
+    }
+
+    private func highAccuracyEntriesIfPresent(
+        from url: URL,
+        models: AsrModels,
+        asrSource: AudioSource,
+        transcriptSource: AudioSide
+    ) async throws -> [TranscriptEntry] {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        guard finalAudioIsLongEnough(url) else {
+            NSLog("[SerialNotes/Transcription] skipping final ASR for short audio file: \(url.lastPathComponent)")
+            return []
+        }
+
+        do {
+            let manager = AsrManager(config: .default)
+            try await manager.loadModels(models)
+            let result = try await manager.transcribe(url, source: asrSource)
+            return finalEntries(from: result, source: transcriptSource)
+        } catch ASRError.invalidAudioData {
+            NSLog("[SerialNotes/Transcription] skipping final ASR for invalid audio file: \(url.lastPathComponent)")
+            return []
+        }
+    }
+
+    private func finalEntries(from result: ASRResult, source: AudioSide) -> [TranscriptEntry] {
+        FinalTranscriptSegmenter.segments(from: result).map { segment in
+            return TranscriptEntry(
+                source: source,
+                speaker: currentSpeaker(for: source, at: segment.midpoint),
+                text: segment.text,
+                timestamp: segment.start
+            )
+        }
+    }
+
+    private func renderTranscript(header: String, entries: [TranscriptEntry]) -> RenderedTranscript {
+        var transcript = header
+        var renderedEntryCount = 0
+        var renderedSources = Set<AudioSide>()
+        var echoContext = EchoSuppressionContext()
+
+        for entry in entries.sorted() {
+            let shouldRender: Bool
+            switch entry.source {
+            case .system:
+                echoContext.recordSystemEntry(
+                    entry,
+                    lookbackSeconds: Self.echoSuppressionLookbackSeconds,
+                    maxEntries: Self.maxEchoSuppressionSystemEntries
+                )
+                shouldRender = true
+            case .mic:
+                shouldRender = !echoContext.shouldSuppressMicEntry(
+                    entry,
+                    lookbackSeconds: Self.echoSuppressionLookbackSeconds
+                )
+            }
+
+            guard shouldRender else { continue }
+            transcript += TranscriptFormatter.entry(
+                speaker: entry.speaker,
+                timestamp: entry.timestamp,
+                text: entry.text
+            )
+            renderedEntryCount += 1
+            renderedSources.insert(entry.source)
+        }
+        return RenderedTranscript(text: transcript, entryCount: renderedEntryCount, sources: renderedSources)
+    }
+
+    private func shouldReplaceStreamingTranscript(with rendered: RenderedTranscript) -> Bool {
+        guard streamingEntryCount > 0 else { return true }
+        return streamingEntrySources.isSubset(of: rendered.sources)
+    }
+
+    private func shouldWriteEntry(_ entry: TranscriptEntry) -> Bool {
+        switch entry.source {
+        case .system:
+            streamingEchoContext.recordSystemEntry(
+                entry,
+                lookbackSeconds: Self.echoSuppressionLookbackSeconds,
+                maxEntries: Self.maxEchoSuppressionSystemEntries
+            )
+            return true
+        case .mic:
+            return !streamingEchoContext.shouldSuppressMicEntry(
+                entry,
+                lookbackSeconds: Self.echoSuppressionLookbackSeconds
+            )
+        }
+    }
+
+    // MARK: - Final ASR
+
+    private func prefetchFinalAsrModelsIfNeeded() {
+        guard cachedFinalAsrModels == nil else { return }
+        guard finalAsrModelsTask == nil else { return }
+        finalAsrModelsTask = Task {
+            try await AsrModels.downloadAndLoad(version: .v2)
+        }
+    }
+
+    private func finalAsrModels() async throws -> AsrModels {
+        if let cachedFinalAsrModels {
+            return cachedFinalAsrModels
+        }
+        prefetchFinalAsrModelsIfNeeded()
+        guard let task = finalAsrModelsTask else {
+            throw TranscriptionError.modelsNotLoaded
+        }
+
+        do {
+            let models = try await task.value
+            cachedFinalAsrModels = models
+            finalAsrModelsTask = nil
+            return models
+        } catch {
+            finalAsrModelsTask = nil
+            throw error
         }
     }
 
     // MARK: - Helpers
+
+    private func sideState(for source: AudioSide) -> SideState {
+        if let state = sideStates[source] { return state }
+        let state = SideState()
+        sideStates[source] = state
+        return state
+    }
+
+    private func addAudio(
+        _ buffer: AVAudioPCMBuffer,
+        to diarizer: LSEENDDiarizer,
+        sourceSampleRate: Double
+    ) throws {
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0, let data = buffer.floatChannelData?[0] else { return }
+        let samples = UnsafeBufferPointer(start: data, count: frameCount)
+        try diarizer.addAudio(samples, sourceSampleRate: sourceSampleRate)
+    }
+
+    private nonisolated func shouldProcessDiarizer(
+        samplesSinceProcess: Int,
+        sampleRate: Double
+    ) -> Bool {
+        guard sampleRate > 0 else { return false }
+        return samplesSinceProcess >= Int(sampleRate * Self.diarizerProcessInterval)
+    }
+
+    private func currentAudioTime() -> TimeInterval {
+        let times = AudioSide.allCases.map { source -> TimeInterval in
+            guard let state = sideStates[source] else { return 0 }
+            guard state.sampleRate > 0 else { return 0 }
+            return TimeInterval(state.samplesProcessed) / state.sampleRate
+        }
+        // Use the leading stream as the session clock so one active side can flush while the other is silent or unavailable.
+        return times.max() ?? 0
+    }
+
+    private nonisolated func finalAudioIsLongEnough(_ url: URL) -> Bool {
+        do {
+            let audioFile = try AVAudioFile(forReading: url)
+            let sampleRate = audioFile.processingFormat.sampleRate
+            guard sampleRate > 0 else { return false }
+            let duration = Double(audioFile.length) / sampleRate
+            return duration >= Self.minimumFinalAudioDuration
+        } catch {
+            return false
+        }
+    }
 
     private nonisolated func midpointTime(
         lastEndSamples: Int,
@@ -448,36 +684,122 @@ actor TranscriptionService {
         return TimeInterval(midSample) / sampleRate
     }
 
-    private nonisolated func makePCMBuffer(samples: [Float], sampleRate: Double) -> AVAudioPCMBuffer? {
-        guard let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate,
-            channels: 1,
-            interleaved: false
-        ) else { return nil }
-
-        guard let buffer = AVAudioPCMBuffer(
-            pcmFormat: format,
-            frameCapacity: AVAudioFrameCount(samples.count)
-        ) else { return nil }
-
-        buffer.frameLength = AVAudioFrameCount(samples.count)
-        samples.withUnsafeBufferPointer { src in
-            buffer.floatChannelData![0].update(from: src.baseAddress!, count: samples.count)
-        }
-        return buffer
-    }
 }
 
 // MARK: - Supporting Types
 
-private struct TranscriptEntry: Comparable {
+enum AudioSide: CaseIterable, Hashable, Sendable {
+    case mic
+    case system
+
+    var sortOrder: Int {
+        switch self {
+        case .system: return 0
+        case .mic: return 1
+        }
+    }
+}
+
+private final class SideState {
+    var asr: StreamingEouAsrManager?
+    var diarizer: LSEENDDiarizer?
+    var samplesProcessed = 0
+    var sampleRate: Double = 0
+    var lastUtteranceEndSamples = 0
+    var diarizerSamplesSinceProcess = 0
+    var speakerLabels: [Int: String] = [:]
+    var nextSystemPersonNumber = 1
+    var micSeenPrimarySpeaker = false
+    var nextMicVoiceNumber = 2
+
+    func resetSession() {
+        samplesProcessed = 0
+        sampleRate = 0
+        lastUtteranceEndSamples = 0
+        diarizerSamplesSinceProcess = 0
+        speakerLabels = [:]
+        nextSystemPersonNumber = 1
+        micSeenPrimarySpeaker = false
+        nextMicVoiceNumber = 2
+    }
+}
+
+private struct TranscriptEntry: Comparable, Sendable {
+    let source: AudioSide
     let speaker: String
     let text: String
     let timestamp: TimeInterval
 
     static func < (lhs: Self, rhs: Self) -> Bool {
-        lhs.timestamp < rhs.timestamp
+        if lhs.timestamp == rhs.timestamp {
+            return lhs.source.sortOrder < rhs.source.sortOrder
+        }
+        return lhs.timestamp < rhs.timestamp
+    }
+}
+
+private struct RenderedTranscript {
+    let text: String
+    let entryCount: Int
+    let sources: Set<AudioSide>
+}
+
+private struct EchoSuppressionContext {
+    private var systemEntries: [TranscriptEntry] = []
+    private var systemWords: [String] = []
+    private var systemBigrams: Set<String> = []
+    private var systemTrigrams: Set<String> = []
+
+    mutating func reset() {
+        systemEntries = []
+        systemWords = []
+        systemBigrams = []
+        systemTrigrams = []
+    }
+
+    mutating func recordSystemEntry(
+        _ entry: TranscriptEntry,
+        lookbackSeconds: TimeInterval,
+        maxEntries: Int
+    ) {
+        systemEntries.append(entry)
+        pruneEntries(relativeTo: entry.timestamp, lookbackSeconds: lookbackSeconds)
+        if systemEntries.count > maxEntries {
+            systemEntries.removeFirst(systemEntries.count - maxEntries)
+        }
+        rebuildCache()
+    }
+
+    mutating func shouldSuppressMicEntry(
+        _ entry: TranscriptEntry,
+        lookbackSeconds: TimeInterval
+    ) -> Bool {
+        if pruneEntries(relativeTo: entry.timestamp, lookbackSeconds: lookbackSeconds) {
+            rebuildCache()
+        }
+        return TranscriptTextProcessing.isLikelyEcho(
+            micText: entry.text,
+            systemWords: systemWords,
+            systemBigrams: systemBigrams,
+            systemTrigrams: systemTrigrams
+        )
+    }
+
+    @discardableResult
+    private mutating func pruneEntries(
+        relativeTo timestamp: TimeInterval,
+        lookbackSeconds: TimeInterval
+    ) -> Bool {
+        let cutoff = timestamp - lookbackSeconds
+        let originalCount = systemEntries.count
+        systemEntries.removeAll { $0.timestamp < cutoff }
+        return systemEntries.count != originalCount
+    }
+
+    private mutating func rebuildCache() {
+        systemWords = systemEntries.flatMap { TranscriptTextProcessing.normalizedWords($0.text) }
+        systemBigrams = TranscriptTextProcessing.shingles(from: systemWords, size: 2)
+        systemTrigrams = TranscriptTextProcessing.shingles(from: systemWords, size: 3)
     }
 }
 
@@ -495,9 +817,8 @@ enum TranscriptionError: LocalizedError {
 /// A single voice enrollment, handed to the transcription service at session start
 /// so the diarizer can label matching voices by name instead of "Person N" / "You".
 struct EnrollmentClip: Sendable {
-    enum Side: Sendable { case mic, system }
     let name: String
-    let side: Side
+    let side: AudioSide
     let samples: [Float]
     let sampleRate: Double
 }

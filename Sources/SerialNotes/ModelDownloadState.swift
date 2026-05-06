@@ -11,6 +11,11 @@ final class ModelDownloadState {
 
     var status: Status = .notStarted
 
+    var isReady: Bool {
+        if case .ready = status { return true }
+        return false
+    }
+
     private let transcriptionService: TranscriptionService
 
     init(transcriptionService: TranscriptionService) {

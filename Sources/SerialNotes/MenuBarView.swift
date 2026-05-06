@@ -7,11 +7,6 @@ struct MenuBarView: View {
     @Environment(MeetingDetectionService.self) private var meetingDetectionService
     @Environment(\.openSettings) private var openSettings
 
-    private var modelsReady: Bool {
-        if case .ready = modelDownloadState.status { return true }
-        return false
-    }
-
     private func showSettings() {
         // .accessory apps don't front their Settings window automatically.
         // Match the pattern used by StorageSettings.pickFolder(): flip to
@@ -47,7 +42,7 @@ struct MenuBarView: View {
         HStack {
             Image(systemName: "waveform.circle")
                 .font(.title2)
-            Text("Cereal Notes")
+            Text("Serial Notes")
                 .font(.headline)
             Spacer()
             Button(action: showSettings) {
@@ -76,7 +71,7 @@ struct MenuBarView: View {
             EmptyView()
         }
 
-        if let meeting = meetingDetectionService.detectedMeeting, modelsReady {
+        if let meeting = meetingDetectionService.detectedMeeting, modelDownloadState.isReady {
             VStack(spacing: 8) {
                 Text("\(meeting.appName) call detected")
                     .font(.caption)
@@ -104,7 +99,7 @@ struct MenuBarView: View {
             }
             .controlSize(.large)
             .buttonStyle(.glassProminent)
-            .disabled(!modelsReady)
+            .disabled(!modelDownloadState.isReady)
         }
 
         if let error = recordingState.errorMessage {
@@ -153,8 +148,6 @@ struct MenuBarView: View {
             .font(.system(.title, design: .monospaced))
             .contentTransition(.numericText())
 
-        livePartialView
-
         Button(action: { recordingState.stop() }) {
             Label("Stop Recording", systemImage: "stop.circle")
                 .frame(maxWidth: .infinity)
@@ -171,35 +164,4 @@ struct MenuBarView: View {
         }
     }
 
-    @ViewBuilder
-    private var livePartialView: some View {
-        let mic = recordingState.livePartialMic
-        let system = recordingState.livePartialSystem
-        if !mic.isEmpty || !system.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                if !mic.isEmpty {
-                    partialLine(speaker: "You", text: mic)
-                }
-                if !system.isEmpty {
-                    partialLine(speaker: "Them", text: system)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 4)
-        }
-    }
-
-    private func partialLine(speaker: String, text: String) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Text(speaker)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(text)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-                .truncationMode(.head)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
 }

@@ -2,24 +2,30 @@ import AVFoundation
 import CoreAudio
 import ScreenCaptureKit
 import SystemAudioTap
+import os
 
 /// Which capture path this session used — reported in session diagnostics.
-enum AudioCapturePath: String, Codable {
+enum AudioCapturePath: String, Codable, Sendable {
     case processTap
     case screenCaptureKit
 }
 
 /// Per-stream statistics captured during the session.
-struct AudioStreamStats: Codable {
+struct AudioStreamStats: Codable, Sendable {
     var bufferCount: Int = 0
     var sampleCount: Int = 0
     var sampleRate: Double = 0
+    var voiceProcessingEnabled: Bool = false
 }
 
-struct AudioCaptureStats: Codable {
+struct AudioCaptureStats: Codable, Sendable {
     var path: AudioCapturePath?
     var system = AudioStreamStats()
     var mic = AudioStreamStats()
+}
+
+struct CapturedAudioBuffer: @unchecked Sendable {
+    let buffer: AVAudioPCMBuffer
 }
 
 final class AudioCaptureService: NSObject, @unchecked Sendable {
@@ -29,33 +35,30 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     private var systemAudioFile: AVAudioFile?
     private var micAudioFile: AVAudioFile?
     private let lock = NSLock()
+    private let statsLock = OSAllocatedUnfairLock(initialState: AudioCaptureStats())
 
     // Fallback for when process tap is unavailable
     private var stream: SCStream?
 
     private var onError: (@Sendable (Error) -> Void)?
 
-    /// Called with ([Float] samples, Double sampleRate) for each system audio buffer.
-    var onSystemAudioBuffer: (@Sendable ([Float], Double) -> Void)?
-    /// Called with ([Float] samples, Double sampleRate) for each mic audio buffer.
-    var onMicAudioBuffer: (@Sendable ([Float], Double) -> Void)?
+    var onSystemAudioBuffer: (@Sendable (CapturedAudioBuffer) -> Void)?
+    var onMicAudioBuffer: (@Sendable (CapturedAudioBuffer) -> Void)?
 
     private static let sampleRate: Double = 48000
     private static let channelCount: AVAudioChannelCount = 1
 
     // Capture diagnostics — read after stopCapture() to write session.json.
-    private var stats = AudioCaptureStats()
-
     /// Snapshot of stats since the last startCapture() call.
     func currentStats() -> AudioCaptureStats {
-        lock.withLock { stats }
+        statsLock.withLock { $0 }
     }
 
     // MARK: - Public API
 
     func startCapture(sessionDir: URL, onError: @escaping @Sendable (Error) -> Void) async throws {
         self.onError = onError
-        lock.withLock { stats = AudioCaptureStats() }
+        statsLock.withLock { $0 = AudioCaptureStats() }
 
         // Request mic permission upfront — accessing AVAudioEngine.inputNode
         // without permission can crash on macOS 15+.
@@ -64,7 +67,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         if IsSystemAudioTapAvailable() {
             do {
                 try startWithProcessTap(sessionDir: sessionDir, micGranted: micGranted)
-                lock.withLock { stats.path = .processTap }
+                statsLock.withLock { $0.path = .processTap }
                 return
             } catch {
                 // Process tap failed — clean up partial state, fall through to SCK
@@ -72,7 +75,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
             }
         }
         try await startWithScreenCaptureKit(sessionDir: sessionDir, micGranted: micGranted)
-        lock.withLock { stats.path = .screenCaptureKit }
+        statsLock.withLock { $0.path = .screenCaptureKit }
     }
 
     func stopCapture() async {
@@ -97,11 +100,11 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     private func startWithProcessTap(sessionDir: URL, micGranted: Bool) throws {
         let info = CreateSystemAudioTap()
         guard info.tapID != 0, info.aggregateDeviceID != 0 else {
-            NSLog("[CerealNotes/Capture] processTap path: tap creation returned zero IDs — falling back")
+            NSLog("[SerialNotes/Capture] processTap path: tap creation returned zero IDs — falling back")
             throw AudioCaptureError.processTapFailed
         }
         tapInfo = info
-        NSLog("[CerealNotes/Capture] processTap path: tap=\(info.tapID) agg=\(info.aggregateDeviceID)")
+        NSLog("[SerialNotes/Capture] processTap path: tap=\(info.tapID) agg=\(info.aggregateDeviceID)")
 
         // --- System Audio via raw AudioDeviceIOProc ---
         // AVAudioEngine + installTap doesn't reliably surface sub-tap audio
@@ -109,40 +112,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         // audio HAL delivers buffers directly.
         try startSystemAudioIOProc(sessionDir: sessionDir, aggDeviceID: info.aggregateDeviceID)
 
-        // --- Microphone Engine (optional — skip if permission denied) ---
-        guard micGranted else { return }
-
-        let micEng = AVAudioEngine()
-        let micInputNode = micEng.inputNode
-        let micHwFormat = micInputNode.outputFormat(forBus: 0)
-        guard micHwFormat.channelCount > 0, micHwFormat.sampleRate > 0 else {
-            return // No mic available — continue with system audio only
-        }
-
-        let micTapFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: micHwFormat.sampleRate,
-            channels: Self.channelCount,
-            interleaved: false
-        )!
-
-        let micFile = try AVAudioFile(
-            forWriting: sessionDir.appendingPathComponent("mic.wav"),
-            settings: micTapFormat.settings
-        )
-        lock.withLock { micAudioFile = micFile }
-
-        micInputNode.installTap(onBus: 0, bufferSize: 4096, format: micTapFormat) { [weak self] buffer, _ in
-            self?.writeBuffer(buffer, for: \.micAudioFile)
-            self?.recordStats(frames: Int(buffer.frameLength), rate: micTapFormat.sampleRate, side: .mic)
-            if let callback = self?.onMicAudioBuffer,
-               let data = buffer.floatChannelData?[0] {
-                let samples = Array(UnsafeBufferPointer(start: data, count: Int(buffer.frameLength)))
-                callback(samples, micTapFormat.sampleRate)
-            }
-        }
-        try micEng.start()
-        micEngine = micEng
+        try startMicrophoneEngine(sessionDir: sessionDir, micGranted: micGranted)
     }
 
     // MARK: - System Audio IOProc (raw HAL — bypasses AVAudioEngine)
@@ -161,13 +131,13 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         let formatStatus = AudioObjectGetPropertyData(
             aggDeviceID, &formatAddr, 0, nil, &formatSize, &streamFormat)
         guard formatStatus == noErr, streamFormat.mSampleRate > 0, streamFormat.mChannelsPerFrame > 0 else {
-            NSLog("[CerealNotes/Capture] failed to query agg input format status=\(formatStatus) sr=\(streamFormat.mSampleRate) ch=\(streamFormat.mChannelsPerFrame)")
+            NSLog("[SerialNotes/Capture] failed to query agg input format status=\(formatStatus) sr=\(streamFormat.mSampleRate) ch=\(streamFormat.mChannelsPerFrame)")
             throw AudioCaptureError.audioUnitConfigFailed
         }
         let sourceSampleRate = streamFormat.mSampleRate
         let sourceChannels = AVAudioChannelCount(streamFormat.mChannelsPerFrame)
         let sourceIsInterleaved = (streamFormat.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
-        NSLog("[CerealNotes/Capture] agg input format sr=\(sourceSampleRate) ch=\(sourceChannels) interleaved=\(sourceIsInterleaved) flags=\(streamFormat.mFormatFlags)")
+        NSLog("[SerialNotes/Capture] agg input format sr=\(sourceSampleRate) ch=\(sourceChannels) interleaved=\(sourceIsInterleaved) flags=\(streamFormat.mFormatFlags)")
 
         // Write file format: mono float32 at the source rate.
         let writeFormat = AVAudioFormat(
@@ -188,7 +158,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         // (commonly 512–4096 frames).
         let pcmCapacity: AVAudioFrameCount = 8192
 
-        let ioQueue = DispatchQueue(label: "com.cerealnotes.system-ioproc", qos: .userInteractive)
+        let ioQueue = DispatchQueue(label: "com.serialnotes.system-ioproc", qos: .userInteractive)
 
         var procID: AudioDeviceIOProcID?
         let createStatus = AudioDeviceCreateIOProcIDWithBlock(
@@ -231,31 +201,29 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
                 dest.update(from: src, count: writeFrames)
             }
 
-            let isFirst = lock.withLock { stats.system.bufferCount == 0 }
+            let isFirst = recordStats(frames: writeFrames, rate: sourceSampleRate, side: .system)
             if isFirst {
-                NSLog("[CerealNotes/Capture] system IOProc FIRST buffer frames=\(writeFrames) sr=\(sourceSampleRate)")
+                NSLog("[SerialNotes/Capture] system IOProc FIRST buffer frames=\(writeFrames) sr=\(sourceSampleRate)")
             }
             writeBuffer(pcm, for: \.systemAudioFile)
-            recordStats(frames: writeFrames, rate: sourceSampleRate, side: .system)
             if let callback = onSystemAudioBuffer {
-                let samples = Array(UnsafeBufferPointer(start: dest, count: writeFrames))
-                callback(samples, sourceSampleRate)
+                callback(CapturedAudioBuffer(buffer: pcm))
             }
         }
         guard createStatus == noErr, let procID else {
-            NSLog("[CerealNotes/Capture] AudioDeviceCreateIOProcIDWithBlock failed status=\(createStatus)")
+            NSLog("[SerialNotes/Capture] AudioDeviceCreateIOProcIDWithBlock failed status=\(createStatus)")
             throw AudioCaptureError.audioUnitConfigFailed
         }
         systemIOProcID = procID
 
         let startStatus = AudioDeviceStart(aggDeviceID, procID)
         guard startStatus == noErr else {
-            NSLog("[CerealNotes/Capture] AudioDeviceStart failed status=\(startStatus)")
+            NSLog("[SerialNotes/Capture] AudioDeviceStart failed status=\(startStatus)")
             AudioDeviceDestroyIOProcID(aggDeviceID, procID)
             systemIOProcID = nil
             throw AudioCaptureError.audioUnitConfigFailed
         }
-        NSLog("[CerealNotes/Capture] system IOProc started on aggDevice=\(aggDeviceID)")
+        NSLog("[SerialNotes/Capture] system IOProc started on aggDevice=\(aggDeviceID)")
     }
 
     // MARK: - ScreenCaptureKit Fallback
@@ -277,19 +245,12 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
             forWriting: sessionDir.appendingPathComponent("system.wav"),
             settings: outputFormat.settings
         )
-        let micFile = try AVAudioFile(
-            forWriting: sessionDir.appendingPathComponent("mic.wav"),
-            settings: outputFormat.settings
-        )
-        lock.withLock {
-            systemAudioFile = systemFile
-            micAudioFile = micFile
-        }
+        lock.withLock { systemAudioFile = systemFile }
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let config = SCStreamConfiguration()
         config.capturesAudio = true
-        config.captureMicrophone = micGranted
+        config.captureMicrophone = false
         config.sampleRate = Int(Self.sampleRate)
         config.channelCount = Int(Self.channelCount)
         config.excludesCurrentProcessAudio = true
@@ -297,14 +258,75 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         config.height = 2
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
 
-        let outputQueue = DispatchQueue(label: "com.cerealnotes.audio-capture")
+        let outputQueue = DispatchQueue(label: "com.serialnotes.audio-capture")
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: outputQueue)
-        if micGranted {
-            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: outputQueue)
-        }
         try await stream.startCapture()
         self.stream = stream
+
+        do {
+            try startMicrophoneEngine(sessionDir: sessionDir, micGranted: micGranted)
+        } catch {
+            try? await stream.stopCapture()
+            self.stream = nil
+            throw error
+        }
+    }
+
+    // MARK: - Microphone Engine
+
+    private func startMicrophoneEngine(sessionDir: URL, micGranted: Bool) throws {
+        guard micGranted else { return }
+
+        let micEng = AVAudioEngine()
+        let micInputNode = micEng.inputNode
+        enableVoiceProcessing(on: micInputNode)
+
+        let micHwFormat = micInputNode.outputFormat(forBus: 0)
+        guard micHwFormat.channelCount > 0, micHwFormat.sampleRate > 0 else {
+            return // No mic available — continue with system audio only
+        }
+
+        let micTapFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: micHwFormat.sampleRate,
+            channels: Self.channelCount,
+            interleaved: false
+        )!
+
+        let micFile = try AVAudioFile(
+            forWriting: sessionDir.appendingPathComponent("mic.wav"),
+            settings: micTapFormat.settings
+        )
+        lock.withLock { micAudioFile = micFile }
+
+        micInputNode.installTap(onBus: 0, bufferSize: 4096, format: micTapFormat) { [weak self] buffer, _ in
+            self?.writeBuffer(buffer, for: \.micAudioFile)
+            self?.recordStats(frames: Int(buffer.frameLength), rate: micTapFormat.sampleRate, side: .mic)
+            if let callback = self?.onMicAudioBuffer,
+               let ownedBuffer = Self.copyBuffer(buffer) {
+                callback(CapturedAudioBuffer(buffer: ownedBuffer))
+            }
+        }
+        try micEng.start()
+        micEngine = micEng
+    }
+
+    private func enableVoiceProcessing(on inputNode: AVAudioInputNode) {
+        do {
+            if !inputNode.isVoiceProcessingEnabled {
+                // System audio is captured on its own stream; mic voice processing reduces playback bleed into the mic track.
+                try inputNode.setVoiceProcessingEnabled(true)
+            }
+            let enabled = inputNode.isVoiceProcessingEnabled
+            statsLock.withLock { $0.mic.voiceProcessingEnabled = enabled }
+            if enabled {
+                NSLog("[SerialNotes/Capture] mic voice processing enabled")
+            }
+        } catch {
+            statsLock.withLock { $0.mic.voiceProcessingEnabled = false }
+            NSLog("[SerialNotes/Capture] mic voice processing unavailable: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Cleanup
@@ -341,18 +363,23 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
 
     private enum StreamSide { case system, mic }
 
-    private func recordStats(frames: Int, rate: Double, side: StreamSide) {
-        lock.withLock {
+    @discardableResult
+    private func recordStats(frames: Int, rate: Double, side: StreamSide) -> Bool {
+        statsLock.withLock {
+            let wasFirst: Bool
             switch side {
             case .system:
-                stats.system.bufferCount += 1
-                stats.system.sampleCount += frames
-                stats.system.sampleRate = rate
+                wasFirst = $0.system.bufferCount == 0
+                $0.system.bufferCount += 1
+                $0.system.sampleCount += frames
+                $0.system.sampleRate = rate
             case .mic:
-                stats.mic.bufferCount += 1
-                stats.mic.sampleCount += frames
-                stats.mic.sampleRate = rate
+                wasFirst = $0.mic.bufferCount == 0
+                $0.mic.bufferCount += 1
+                $0.mic.sampleCount += frames
+                $0.mic.sampleRate = rate
             }
+            return wasFirst
         }
     }
 
@@ -360,7 +387,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     private func writeSampleBuffer(
         _ sampleBuffer: CMSampleBuffer,
         to keyPath: KeyPath<AudioCaptureService, AVAudioFile?>,
-        callback: ((@Sendable ([Float], Double) -> Void))? = nil
+        callback: ((@Sendable (CapturedAudioBuffer) -> Void))? = nil
     ) {
         guard let formatDescription = sampleBuffer.formatDescription,
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription),
@@ -391,9 +418,26 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         writeBuffer(pcmBuffer, for: keyPath)
 
         if let callback {
-            let samples = Array(UnsafeBufferPointer(start: destPtr, count: Int(pcmBuffer.frameLength)))
-            callback(samples, format.sampleRate)
+            callback(CapturedAudioBuffer(buffer: pcmBuffer))
         }
+    }
+
+    private static func copyBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let frameLength = buffer.frameLength
+        guard frameLength > 0,
+              let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: frameLength),
+              let source = buffer.floatChannelData,
+              let destination = copy.floatChannelData else {
+            return nil
+        }
+
+        copy.frameLength = frameLength
+        let frameCount = Int(frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        for channel in 0..<channelCount {
+            destination[channel].update(from: source[channel], count: frameCount)
+        }
+        return copy
     }
 
 }
@@ -404,7 +448,11 @@ extension AudioCaptureService: SCStreamOutput {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard sampleBuffer.isValid else { return }
         let frames = CMSampleBufferGetNumSamples(sampleBuffer)
-        let rate = CMAudioFormatDescriptionGetStreamBasicDescription(sampleBuffer.formatDescription!)?.pointee.mSampleRate ?? 0
+        guard let formatDescription = sampleBuffer.formatDescription,
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
+            return
+        }
+        let rate = asbd.pointee.mSampleRate
         switch type {
         case .audio:
             writeSampleBuffer(sampleBuffer, to: \.systemAudioFile, callback: onSystemAudioBuffer)

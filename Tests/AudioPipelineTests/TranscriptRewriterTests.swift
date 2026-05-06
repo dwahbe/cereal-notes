@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import CerealNotes
+@testable import SerialNotes
 
 @Suite("Transcript Rewriter")
 struct TranscriptRewriterTests {
@@ -46,12 +46,38 @@ struct TranscriptRewriterTests {
         #expect(await rewriter.rewrite("  hello world  ") == "Hello world.")
     }
 
+    @Test("Heuristic: adds sentence breaks to long ASR chunks")
+    func heuristicBreaksLongChunks() async {
+        let rewriter = HeuristicRewriter()
+        let input = "we need to review the roadmap with enough context for everyone so now we can decide what changes matter and finally we should capture the follow up clearly"
+        let result = await rewriter.rewrite(input)
+
+        #expect(result.contains(". So now"), "Expected discourse sentence break, got '\(result)'")
+        #expect(result.contains(". Finally"), "Expected final transition sentence break, got '\(result)'")
+
+        let normalize: (String) -> String = { s in
+            s.lowercased().unicodeScalars.filter {
+                CharacterSet.alphanumerics.contains($0)
+            }.map(String.init).joined()
+        }
+        #expect(normalize(result) == normalize(input), "Word sequence changed: '\(result)'")
+    }
+
+    @Test("Heuristic: collapses obvious immediate ASR repetitions")
+    func heuristicCollapsesImmediateRepeats() async {
+        let rewriter = HeuristicRewriter()
+        let input = "we will work with work with work with partners because this is really really really important"
+        let result = await rewriter.rewrite(input)
+
+        #expect(result == "We will work with partners because this is really really important.")
+    }
+
     /// End-to-end smoke test against Apple Foundation Models. Skipped unless
-    /// `CEREAL_FM_TEST=1` because `swift test` runs outside the `.app` bundle
+    /// `SERIAL_FM_TEST=1` because `swift test` runs outside the `.app` bundle
     /// and Apple Intelligence availability depends on the host.
     @Test(
-        "FoundationModels smoke test (gated by CEREAL_FM_TEST)",
-        .enabled(if: ProcessInfo.processInfo.environment["CEREAL_FM_TEST"] == "1")
+        "FoundationModels smoke test (gated by SERIAL_FM_TEST)",
+        .enabled(if: ProcessInfo.processInfo.environment["SERIAL_FM_TEST"] == "1")
     )
     func foundationModelsSmokeTest() async {
         let rewriter = FoundationModelsRewriter()

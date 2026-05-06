@@ -7,13 +7,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct CerealNotesApp: App {
+struct SerialNotesApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var recordingState = RecordingState()
-    @State private var storageSettings = StorageSettings()
+    @State private var recordingState: RecordingState
+    @State private var storageSettings: StorageSettings
     @State private var modelDownloadState: ModelDownloadState
     @State private var meetingDetectionService: MeetingDetectionService
-    @State private var voiceProfileStore = VoiceProfileStore()
+    @State private var voiceProfileStore: VoiceProfileStore
 
     init() {
         let recording = RecordingState()

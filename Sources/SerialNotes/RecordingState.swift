@@ -6,11 +6,6 @@ final class RecordingState {
     var elapsedTime: TimeInterval = 0
     var errorMessage: String?
 
-    /// In-progress partial text from the mic stream (what you're saying now).
-    var livePartialMic: String = ""
-    /// In-progress partial text from the system-audio stream (what the remote side is saying).
-    var livePartialSystem: String = ""
-
     @ObservationIgnored var onRecordingChange: (@MainActor () -> Void)?
     @ObservationIgnored weak var voiceProfileStore: VoiceProfileStore?
 
@@ -38,32 +33,35 @@ final class RecordingState {
             let sessionDir = storageDirectory.appendingPathComponent(Self.sessionDirectoryName())
             try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
 
-            // Wire transcription callbacks (errors + live partials).
+            // Wire transcription error callback.
             await transcriptionService.setCallbacks(
                 onError: { [weak self] error in
                     Task { @MainActor in
                         self?.errorMessage = error.localizedDescription
                     }
-                },
-                onMicPartial: { [weak self] text in
-                    Task { @MainActor in
-                        self?.livePartialMic = text
-                    }
-                },
-                onSystemPartial: { [weak self] text in
-                    Task { @MainActor in
-                        self?.livePartialSystem = text
-                    }
                 }
+            )
+
+            // Start the transcription session before capture so the actor's
+            // per-side ASR/diarizer state is reset and `activeSessionID` is set
+            // before any audio buffer can arrive. Otherwise buffers fired
+            // between startCapture's return and startSession's completion would
+            // bleed into stale state.
+            let now = Date()
+            let enrollments = loadEnrollments()
+            try await transcriptionService.startSession(
+                sessionDirectory: sessionDir,
+                sessionStart: now,
+                enrollments: enrollments
             )
 
             // Wire audio buffer callbacks for transcription.
             let transcriber = transcriptionService
-            captureService.onSystemAudioBuffer = { samples, sampleRate in
-                Task { await transcriber.processSystemAudio(samples, sampleRate: sampleRate) }
+            captureService.onSystemAudioBuffer = { buffer in
+                Task { await transcriber.processSystemAudio(buffer) }
             }
-            captureService.onMicAudioBuffer = { samples, sampleRate in
-                Task { await transcriber.processMicAudio(samples, sampleRate: sampleRate) }
+            captureService.onMicAudioBuffer = { buffer in
+                Task { await transcriber.processMicAudio(buffer) }
             }
 
             try await captureService.startCapture(sessionDir: sessionDir) { [weak self] error in
@@ -73,18 +71,8 @@ final class RecordingState {
                 }
             }
 
-            let now = Date()
-            let enrollments = loadEnrollments()
-            try await transcriptionService.startSession(
-                sessionDirectory: sessionDir,
-                sessionStart: now,
-                enrollments: enrollments
-            )
-
             isRecording = true
             errorMessage = nil
-            livePartialMic = ""
-            livePartialSystem = ""
             startDate = now
             currentSessionDir = sessionDir
             elapsedTime = 0
@@ -108,14 +96,12 @@ final class RecordingState {
         let sessionDir = currentSessionDir
         startDate = nil
         currentSessionDir = nil
-        livePartialMic = ""
-        livePartialSystem = ""
         onRecordingChange?()
         Task { [weak self] in
             guard let self else { return }
-            await self.transcriptionService.endSession()
-            let stats = self.captureService.currentStats()
             await self.stopCapture()
+            let stats = self.captureService.currentStats()
+            await self.transcriptionService.endSession()
             self.finalizeSession(
                 sessionDir: sessionDir,
                 sessionStart: sessionStart,
@@ -173,7 +159,7 @@ final class RecordingState {
         guard let store = voiceProfileStore else { return [] }
         return store.profiles.compactMap { profile -> EnrollmentClip? in
             guard let clip = store.loadClipSamples(for: profile) else { return nil }
-            let side: EnrollmentClip.Side = profile.kind == .you ? .mic : .system
+            let side: AudioSide = profile.kind == .you ? .mic : .system
             return EnrollmentClip(
                 name: profile.name,
                 side: side,

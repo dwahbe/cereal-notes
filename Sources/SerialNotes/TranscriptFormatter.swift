@@ -1,6 +1,10 @@
 import Foundation
 
 enum TranscriptFormatter {
+    private static let inlineEntryLimit = 180
+    private static let paragraphCharacterLimit = 420
+    private static let paragraphSentenceLimit = 3
+
     /// Produces a fixed-width header so it can be rewritten in place at end-of-session
     /// via `seek(toOffset: 0)`. Duration is always formatted `HHhMMmSSs`.
     static func header(date: Date, duration: TimeInterval) -> String {
@@ -29,7 +33,12 @@ enum TranscriptFormatter {
     }
 
     static func entry(speaker: String, timestamp: TimeInterval, text: String) -> String {
-        "**\(speaker)** (\(formatTimestamp(timestamp))): \(text)\n\n"
+        let body = readableBody(text)
+        let prefix = "**\(speaker)** (\(formatTimestamp(timestamp)))"
+        if body.count <= inlineEntryLimit && !body.contains("\n") {
+            return "\(prefix): \(body)\n\n"
+        }
+        return "\(prefix):\n\n\(body)\n\n"
     }
 
     static func formatTimestamp(_ seconds: TimeInterval) -> String {
@@ -47,5 +56,79 @@ enum TranscriptFormatter {
         let minutes = (totalSeconds % 3600) / 60
         let secs = totalSeconds % 60
         return String(format: "%02dh%02dm%02ds", hours, minutes, secs)
+    }
+
+    private static func readableBody(_ text: String) -> String {
+        let normalized = text
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.count > inlineEntryLimit else { return normalized }
+
+        let sentences = splitSentences(normalized)
+        guard sentences.count > 1 else {
+            return wordParagraphs(normalized, maxWords: 80).joined(separator: "\n\n")
+        }
+
+        var paragraphs: [String] = []
+        var current: [String] = []
+        var currentCharacters = 0
+
+        for sentence in sentences {
+            current.append(sentence)
+            currentCharacters += sentence.count
+
+            if current.count >= paragraphSentenceLimit || currentCharacters >= paragraphCharacterLimit {
+                paragraphs.append(current.joined(separator: " "))
+                current.removeAll(keepingCapacity: true)
+                currentCharacters = 0
+            }
+        }
+
+        if !current.isEmpty {
+            paragraphs.append(current.joined(separator: " "))
+        }
+
+        return paragraphs.joined(separator: "\n\n")
+    }
+
+    private static func splitSentences(_ text: String) -> [String] {
+        var sentences: [String] = []
+        text.enumerateSubstrings(
+            in: text.startIndex..<text.endIndex,
+            options: [.bySentences, .localized]
+        ) { substring, _, _, _ in
+            guard let sentence = substring?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !sentence.isEmpty else {
+                return
+            }
+            sentences.append(sentence)
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return sentences.isEmpty && !trimmed.isEmpty ? [trimmed] : sentences
+    }
+
+    private static func wordParagraphs(_ text: String, maxWords: Int) -> [String] {
+        let words = text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard !words.isEmpty else { return [] }
+
+        var paragraphs: [String] = []
+        var current: [String] = []
+        current.reserveCapacity(maxWords)
+
+        for word in words {
+            current.append(word)
+            if current.count >= maxWords {
+                paragraphs.append(current.joined(separator: " "))
+                current.removeAll(keepingCapacity: true)
+            }
+        }
+
+        if !current.isEmpty {
+            paragraphs.append(current.joined(separator: " "))
+        }
+        return paragraphs
     }
 }

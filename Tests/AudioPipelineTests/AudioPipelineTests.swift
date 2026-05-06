@@ -115,14 +115,19 @@ struct MicrophoneEngineTests {
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { _, _ in
             bufferCount += 1
         }
+        defer {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+
         try engine.start()
-        try await Task.sleep(for: .milliseconds(500))
+        for _ in 0..<15 {
+            if bufferCount > 0 { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
 
         print("Mic engine received \(bufferCount) buffers")
         #expect(bufferCount > 0)
-
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
     }
 }
 
@@ -189,7 +194,7 @@ final class TestSCStreamDelegate: NSObject, SCStreamDelegate, SCStreamOutput, @u
 @Suite("Full Pipeline", .serialized)
 struct FullPipelineTests {
     /// End-to-end check that the system-audio IOProc path actually delivers
-    /// frames. Gated behind `CEREAL_AUDIO_INTEGRATION_TEST=1` because:
+    /// frames. Gated behind `SERIAL_AUDIO_INTEGRATION_TEST=1` because:
     ///   1. `swift test` runs outside the `.app` bundle, so TCC denies the
     ///      tap-aggregate creation — the test would always fail in CI/normal
     ///      local runs.
@@ -199,7 +204,7 @@ struct FullPipelineTests {
     ///   - Grant the test binary System Audio Recording permission, or run
     ///     it from a properly bundled `.app`.
     ///   - Start playing audio (any source) on the default output device.
-    ///   - Run: `CEREAL_AUDIO_INTEGRATION_TEST=1 swift test --filter FullPipelineTests`
+    ///   - Run: `SERIAL_AUDIO_INTEGRATION_TEST=1 swift test --filter FullPipelineTests`
     ///
     /// This is the regression check that *should* have caught the AVAudioEngine
     /// vs. raw IOProc bug (the original assertion was just `fileSize > 44`,
@@ -207,8 +212,8 @@ struct FullPipelineTests {
     /// on observed buffer count, not file size.
     @Test("System audio IOProc delivers buffers (integration)")
     func systemAudioIOProcDeliversBuffers() async throws {
-        guard ProcessInfo.processInfo.environment["CEREAL_AUDIO_INTEGRATION_TEST"] == "1" else {
-            print("⏭ Skipping — set CEREAL_AUDIO_INTEGRATION_TEST=1 to run")
+        guard ProcessInfo.processInfo.environment["SERIAL_AUDIO_INTEGRATION_TEST"] == "1" else {
+            print("⏭ Skipping — set SERIAL_AUDIO_INTEGRATION_TEST=1 to run")
             return
         }
         guard IsSystemAudioTapAvailable() else {

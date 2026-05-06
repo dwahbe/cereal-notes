@@ -3,7 +3,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "CerealNotes",
+    name: "SerialNotes",
     platforms: [
         .macOS(.v26)
     ],
@@ -20,18 +20,18 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "CerealNotes",
+            name: "SerialNotes",
             dependencies: [
                 "SystemAudioTap",
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],
-            path: "Sources/CerealNotes",
-            exclude: ["Info.plist", "CerealNotes.entitlements"]
+            path: "Sources/SerialNotes",
+            exclude: ["Info.plist", "SerialNotes.entitlements"]
         ),
         .testTarget(
             name: "AudioPipelineTests",
             dependencies: [
-                "CerealNotes",
+                "SerialNotes",
                 "SystemAudioTap",
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],

@@ -14,7 +14,7 @@ final class VoiceProfileStore {
             in: .userDomainMask
         ).first!
         self.directory = appSupport
-            .appendingPathComponent("CerealNotes", isDirectory: true)
+            .appendingPathComponent("SerialNotes", isDirectory: true)
             .appendingPathComponent("voices", isDirectory: true)
 
         try? FileManager.default.createDirectory(

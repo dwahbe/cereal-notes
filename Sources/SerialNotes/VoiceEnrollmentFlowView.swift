@@ -125,9 +125,9 @@ private struct IntroStep: View {
             }
 
             VStack(spacing: 12) {
-                Text("Teach Cereal your voice")
+                Text("Teach Serial your voice")
                     .font(.title2.weight(.semibold))
-                Text("Read three short phrases out loud. Cereal will learn your voice so it can label you by name in future meeting transcripts.")
+                Text("Read three short phrases out loud. Serial will learn your voice so it can label you by name in future meeting transcripts.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -307,7 +307,7 @@ private struct NamingStep: View {
             VStack(spacing: 12) {
                 Text("Name your voice")
                     .font(.title2.weight(.semibold))
-                Text("This name appears in your meeting transcripts whenever Cereal detects your voice.")
+                Text("This name appears in your meeting transcripts whenever Serial detects your voice.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -387,7 +387,7 @@ private struct DoneStep: View {
                 Text("You're all set, \(name).")
                     .font(.title2.weight(.semibold))
                     .multilineTextAlignment(.center)
-                Text("Cereal will use your voice to identify you in future transcripts. You can re-record or delete your profile anytime from Settings.")
+                Text("Serial will use your voice to identify you in future transcripts. You can re-record or delete your profile anytime from Settings.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

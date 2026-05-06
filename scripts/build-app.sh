@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Build the SwiftPM binary and wrap it into CerealNotes.app so that
+# Build the SwiftPM binary and wrap it into SerialNotes.app so that
 # LaunchServices-gated APIs (UNUserNotificationCenter, Login Items, etc.) work.
 #
-# Output: <repo>/.build/CerealNotes.app
+# Output: <repo>/.build/SerialNotes.app
 
 set -euo pipefail
 
@@ -13,11 +13,11 @@ if [[ "$CONFIG" != "debug" && "$CONFIG" != "release" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="CerealNotes"
-BUNDLE_ID="com.cerealnotes.app"
+APP_NAME="SerialNotes"
+BUNDLE_ID="com.serialnotes.app"
 SRC_DIR="$ROOT/Sources/$APP_NAME"
 INFO_PLIST="$SRC_DIR/Info.plist"
-ENTITLEMENTS="$SRC_DIR/CerealNotes.entitlements"
+ENTITLEMENTS="$SRC_DIR/SerialNotes.entitlements"
 OUT_DIR="$ROOT/.build"
 APP_BUNDLE="$OUT_DIR/$APP_NAME.app"
 

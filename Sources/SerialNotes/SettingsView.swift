@@ -69,7 +69,7 @@ private struct VoicesSettingsTab: View {
 
             Section {
                 if voiceStore.otherProfiles.isEmpty {
-                    Text("You haven't named anyone yet. After a meeting, you can name the people Cereal Notes detected.")
+                    Text("You haven't named anyone yet. After a meeting, you can name the people Serial Notes detected.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {

@@ -61,18 +61,18 @@ SystemAudioTapInfo CreateSystemAudioTap(void) {
     SystemAudioTapInfo info = {0, 0};
 
     if (!IsSystemAudioTapAvailable()) {
-        NSLog(@"[CerealNotes/Tap] IsSystemAudioTapAvailable returned false");
+        NSLog(@"[SerialNotes/Tap] IsSystemAudioTapAvailable returned false");
         return info;
     }
 
     id tap = CreateTapDescriptionObject();
     if (!tap) {
-        NSLog(@"[CerealNotes/Tap] CreateTapDescriptionObject returned nil");
+        NSLog(@"[SerialNotes/Tap] CreateTapDescriptionObject returned nil");
         return info;
     }
 
     // Configure the tap via KVC
-    [tap setValue:@"CerealNotes-Audio-Tap" forKey:@"name"];
+    [tap setValue:@"SerialNotes-Audio-Tap" forKey:@"name"];
     [tap setValue:@0 forKey:@"muteBehavior"];
     [tap setValue:@YES forKey:@"private"];
 
@@ -80,11 +80,11 @@ SystemAudioTapInfo CreateSystemAudioTap(void) {
     AudioObjectID tapID = 0;
     OSStatus status = AudioHardwareCreateProcessTap(tap, &tapID);
     if (status != noErr || tapID == 0) {
-        NSLog(@"[CerealNotes/Tap] AudioHardwareCreateProcessTap failed status=%@ tapID=%u",
+        NSLog(@"[SerialNotes/Tap] AudioHardwareCreateProcessTap failed status=%@ tapID=%u",
               FourCCString(status), tapID);
         return info;
     }
-    NSLog(@"[CerealNotes/Tap] AudioHardwareCreateProcessTap ok tapID=%u", tapID);
+    NSLog(@"[SerialNotes/Tap] AudioHardwareCreateProcessTap ok tapID=%u", tapID);
 
     info.tapID = tapID;
 
@@ -93,7 +93,7 @@ SystemAudioTapInfo CreateSystemAudioTap(void) {
     // instead of the old sub-device approach with kAudioDevicePropertyDeviceUID.
     NSUUID *tapUUID = [tap valueForKey:@"UUID"];
     if (!tapUUID) {
-        NSLog(@"[CerealNotes/Tap] tap UUID was nil — destroying tap");
+        NSLog(@"[SerialNotes/Tap] tap UUID was nil — destroying tap");
         AudioHardwareDestroyProcessTap(tapID);
         info.tapID = 0;
         return info;
@@ -117,7 +117,7 @@ SystemAudioTapInfo CreateSystemAudioTap(void) {
         kAudioObjectSystemObject, &defaultOutputAddr, 0, NULL,
         &sizeOfDeviceID, &defaultOutputDevice);
     if (defaultStatus != noErr || defaultOutputDevice == kAudioObjectUnknown) {
-        NSLog(@"[CerealNotes/Tap] could not resolve default output device status=%@ id=%u",
+        NSLog(@"[SerialNotes/Tap] could not resolve default output device status=%@ id=%u",
               FourCCString(defaultStatus), defaultOutputDevice);
         AudioHardwareDestroyProcessTap(tapID);
         info.tapID = 0;
@@ -135,20 +135,20 @@ SystemAudioTapInfo CreateSystemAudioTap(void) {
         defaultOutputDevice, &uidAddr, 0, NULL,
         &sizeOfUIDRef, &outputUIDRef);
     if (uidStatus != noErr || outputUIDRef == NULL) {
-        NSLog(@"[CerealNotes/Tap] could not resolve default output UID status=%@",
+        NSLog(@"[SerialNotes/Tap] could not resolve default output UID status=%@",
               FourCCString(uidStatus));
         AudioHardwareDestroyProcessTap(tapID);
         info.tapID = 0;
         return info;
     }
     NSString *outputUID = (__bridge_transfer NSString *)outputUIDRef;
-    NSLog(@"[CerealNotes/Tap] default output device id=%u uid=%@", defaultOutputDevice, outputUID);
+    NSLog(@"[SerialNotes/Tap] default output device id=%u uid=%@", defaultOutputDevice, outputUID);
 
     // Create a private aggregate device that contains the default output as
     // the main sub-device + clock source, with the process tap as a sub-tap.
     NSDictionary *aggDesc = @{
-        @(kAudioAggregateDeviceUIDKey): @"com.cerealnotes.system-audio",
-        @(kAudioAggregateDeviceNameKey): @"CerealNotes System Audio",
+        @(kAudioAggregateDeviceUIDKey): @"com.serialnotes.system-audio",
+        @(kAudioAggregateDeviceNameKey): @"SerialNotes System Audio",
         @(kAudioAggregateDeviceIsPrivateKey): @YES,
         @(kAudioAggregateDeviceIsStackedKey): @NO,
         @(kAudioAggregateDeviceMainSubDeviceKey): outputUID,
@@ -167,13 +167,13 @@ SystemAudioTapInfo CreateSystemAudioTap(void) {
     AudioDeviceID aggDeviceID = 0;
     status = AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)aggDesc, &aggDeviceID);
     if (status != noErr || aggDeviceID == 0) {
-        NSLog(@"[CerealNotes/Tap] AudioHardwareCreateAggregateDevice failed status=%@ aggDeviceID=%u",
+        NSLog(@"[SerialNotes/Tap] AudioHardwareCreateAggregateDevice failed status=%@ aggDeviceID=%u",
               FourCCString(status), aggDeviceID);
         AudioHardwareDestroyProcessTap(tapID);
         info.tapID = 0;
         return info;
     }
-    NSLog(@"[CerealNotes/Tap] aggregate device created aggDeviceID=%u tapUUID=%@ mainSub=%@",
+    NSLog(@"[SerialNotes/Tap] aggregate device created aggDeviceID=%u tapUUID=%@ mainSub=%@",
           aggDeviceID, tapUUIDString, outputUID);
 
     info.aggregateDeviceID = aggDeviceID;
@@ -187,7 +187,7 @@ void *_Nullable CreateTapDescription(void) {
     id tap = CreateTapDescriptionObject();
     if (!tap) return NULL;
 
-    [tap setValue:@"CerealNotes-Audio-Tap" forKey:@"name"];
+    [tap setValue:@"SerialNotes-Audio-Tap" forKey:@"name"];
     [tap setValue:@0 forKey:@"muteBehavior"];
     [tap setValue:@YES forKey:@"private"];
 

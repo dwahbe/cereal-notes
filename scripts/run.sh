@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Dev loop: kill any running CerealNotes, rebuild the .app, launch it.
+# Dev loop: kill any running SerialNotes, rebuild the .app, launch it.
 
 set -euo pipefail
 
 CONFIG="${1:-debug}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="CerealNotes"
+APP_NAME="SerialNotes"
 APP_BUNDLE="$ROOT/.build/$APP_NAME.app"
 
 echo "==> stopping existing $APP_NAME instances"

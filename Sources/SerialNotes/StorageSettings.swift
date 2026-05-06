@@ -25,7 +25,7 @@ final class StorageSettings {
 
     private static var defaultLocation: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/CerealNotes")
+            .appendingPathComponent("Documents/SerialNotes")
     }
 
     func pickFolder() {

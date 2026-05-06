@@ -2,7 +2,7 @@
 
 ## What is this?
 
-Cereal Notes — a menu bar-only macOS app that captures meeting audio, transcribes locally, and exports Markdown. See `README.md` for full product context.
+Serial Notes — a menu bar-only macOS app that captures meeting audio, transcribes locally, and exports Markdown. See `README.md` for full product context.
 
 ## Build & Run
 
@@ -17,7 +17,7 @@ binary. macOS LaunchServices-gated APIs (Login Items, URL schemes,
 `UNUserNotificationCenter`, TCC prompts tied to a bundle ID) require the
 binary to live inside a proper `.app` bundle with a sibling
 `Contents/Info.plist`. The scripts build the SwiftPM binary, wrap it into
-`.build/CerealNotes.app`, ad-hoc sign it with entitlements, and register it
+`.build/SerialNotes.app`, ad-hoc sign it with entitlements, and register it
 with LaunchServices. This mirrors the pattern used by
 [CodexBar](https://github.com/steipete/CodexBar) and other shipping
 SwiftPM-native menu bar apps.
@@ -41,8 +41,8 @@ scripts/
   build-app.sh             # swift build → wrap into .app → codesign → lsregister
   run.sh                   # kill existing instance → build-app.sh → open .app
 Sources/
-  CerealNotes/             # Main app target (SwiftUI executable)
-    CerealNotesApp.swift              # Entry point, MenuBarExtra + Settings scenes,
+  SerialNotes/             # Main app target (SwiftUI executable)
+    SerialNotesApp.swift              # Entry point, MenuBarExtra + Settings scenes,
                                       #   kicks off model download at launch
     MenuBarView.swift                 # Popover UI (idle + recording states)
     SettingsView.swift                # Settings window (General + Voices tabs)
@@ -63,14 +63,14 @@ Sources/
     VoiceEnrollmentRecorder.swift     # @Observable mic recorder used by enrollment
     VoiceEnrollmentFlowView.swift     # Face-ID-style guided enrollment flow
     Info.plist                        # Real bundle plist (copied into .app)
-    CerealNotes.entitlements          # Applied via codesign in build-app.sh
+    SerialNotes.entitlements          # Applied via codesign in build-app.sh
   SystemAudioTap/          # ObjC module wrapping CoreAudio tap API
 Tests/
   AudioPipelineTests/      # Swift test suites (swift test — no .app needed).
                            #   Tap C-API + mic-engine + SCK + transcription
                            #   suites pass under `swift test`. The system-audio
                            #   IOProc end-to-end test is gated behind
-                           #   CEREAL_AUDIO_INTEGRATION_TEST=1 because TCC
+                           #   SERIAL_AUDIO_INTEGRATION_TEST=1 because TCC
                            #   denies aggregate-device creation to a
                            #   non-bundled binary.
     AudioPipelineTests.swift          # C tap API, mic engine, SCK, IOProc integration
@@ -78,7 +78,7 @@ Tests/
     TapDeviceTests.swift              # Process-tap device introspection
     TranscriptionTests.swift          # FluidAudio ASR + diarizer smoke tests
     TranscriptRewriterTests.swift     # Heuristic rewriter + FM smoke test
-                                      #   (FM smoke test gated by CEREAL_FM_TEST=1)
+                                      #   (FM smoke test gated by SERIAL_FM_TEST=1)
 ```
 
 ## Architecture
@@ -88,9 +88,9 @@ Tests/
 - **System audio uses raw HAL IOProc, not AVAudioEngine**: the system path runs `AudioDeviceCreateIOProcIDWithBlock` + `AudioDeviceStart` directly on the tap-aggregate device. Do **not** revert to `AVAudioEngine.inputNode.installTap` — it goes through AUHAL, and AUHAL on a tap-aggregate device silently delivers zero buffers (engine reports running, IO proc gets created, no buffers ever fire the tap callback). The mic path stays on AVAudioEngine because the mic is a regular input device, not an aggregate.
 - **Aggregate device construction**: `SystemAudioTap.m` builds a private aggregate containing the **default output device as `kAudioAggregateDeviceMainSubDeviceKey` + `kAudioAggregateDeviceSubDeviceListKey`** plus the process tap as a sub-tap. The output device is required as the clock master — a tap-only aggregate has no clock and its IO proc never fires. The output's normal audio routing isn't disturbed; the tap just observes what's sent to it.
 - **State**: `RecordingState` owns the `AudioCaptureService` and drives the UI. `StorageSettings` manages the output directory via UserDefaults. `VoiceProfileStore` holds saved enrollment profiles.
-- **Transcription**: [FluidAudio](https://github.com/FluidInference/FluidAudio) Parakeet streaming ASR + LS-EEND DIHARD III diarizer, both on-device. Models are cached in `~/Library/Application Support/FluidAudio/Models/`. Download is kicked off at app launch from `CerealNotesApp.init` (not popover open) so the banner can record without requiring the user to open the popover first. `RecordingState.start()` also awaits `downloadModelsIfNeeded()` as a safety net — idempotent, so no double-download.
+- **Transcription**: [FluidAudio](https://github.com/FluidInference/FluidAudio) Parakeet streaming ASR + LS-EEND DIHARD III diarizer, both on-device. Models are cached in `~/Library/Application Support/FluidAudio/Models/`. Download is kicked off at app launch from `SerialNotesApp.init` (not popover open) so the banner can record without requiring the user to open the popover first. `RecordingState.start()` also awaits `downloadModelsIfNeeded()` as a safety net — idempotent, so no double-download.
 - **Punctuation + capitalization**: Parakeet emits raw lowercase with no punctuation. `TranscriptRewriter` closes the gap: on each EOU callback, `TranscriptionService` awaits the rewriter before appending to `pendingEntries`. The production implementation (`FoundationModelsRewriter`) is an actor around Apple's on-device `LanguageModelSession` (macOS 26+) using a `@Generable` schema + 2s timeout + strict word-equality guard (lowercased-alphanumeric compare) to reject hallucinations. When Apple Intelligence is unavailable (disabled, ineligible hardware, model not ready) the factory returns `HeuristicRewriter` — capitalize first char, append `.` if missing. The rewriter only runs on finalized utterances; live-partial UI stays raw.
-- **Voice enrollment**: `VoiceProfileStore` persists profiles to `~/Library/Application Support/CerealNotes/voices/` as `<uuid>.json` + `<uuid>.wav` pairs. `VoiceEnrollmentRecorder` captures a short mic clip with per-phrase silence detection (RMS threshold + hangover) and advances through three phrases. `VoiceEnrollmentFlowView` is the Face-ID-style guided UI. On session start, `RecordingState` hands enrollment clips to `TranscriptionService.startSession(enrollments:)`, which primes each diarizer so matching voices get named instead of labeled `You` / `Person N`.
+- **Voice enrollment**: `VoiceProfileStore` persists profiles to `~/Library/Application Support/SerialNotes/voices/` as `<uuid>.json` + `<uuid>.wav` pairs. `VoiceEnrollmentRecorder` captures a short mic clip with per-phrase silence detection (RMS threshold + hangover) and advances through three phrases. `VoiceEnrollmentFlowView` is the Face-ID-style guided UI. On session start, `RecordingState` hands enrollment clips to `TranscriptionService.startSession(enrollments:)`, which primes each diarizer so matching voices get named instead of labeled `You` / `Person N`.
 - **Detection suspend/resume**: any code that holds the mic for non-meeting purposes (currently just `VoiceEnrollmentRecorder`) must call `MeetingDetectionService.suspendDetection()` before engine start and `resumeDetection()` on stop. Otherwise enrollment audio would false-fire the "meeting detected" banner. Wiring lives in `SettingsView`'s `VoicesSettingsTab.onAppear`.
 - **Settings scene**: a standard SwiftUI `Settings { … }` scene (not a bespoke window). `SettingsWindowChrome` observes the hosting NSWindow's `willCloseNotification` and restores `NSApp.setActivationPolicy(.accessory)`; without this, clicking the gear flips the app to `.regular` and leaves it visible in Dock + Cmd-Tab after the window closes.
 - **Meeting detection**: `MeetingDetectionService` fuses two local signals — NSWorkspace launch/terminate/activate notifications (known meeting app bundle IDs) and a CoreAudio `kAudioDevicePropertyDeviceIsRunningSomewhere` listener on the default input device (mic in use). Known bundle IDs: Zoom, Microsoft Teams (v1 + v2), FaceTime, Slack, Webex, Discord.
@@ -107,12 +107,12 @@ See **[DESIGN.md](DESIGN.md)** for all frontend and design decisions (Liquid Gla
 
 - Target macOS 26 APIs freely — no backwards compatibility needed
 - `Info.plist` is a real file copied into `.app/Contents/` by `build-app.sh` (no linker `__info_plist` hack)
-- `CerealNotes.entitlements` is applied via `codesign --entitlements` in `build-app.sh` — currently only `com.apple.security.device.audio-input`
-- Bundle ID: `com.cerealnotes.app`
+- `SerialNotes.entitlements` is applied via `codesign --entitlements` in `build-app.sh` — currently only `com.apple.security.device.audio-input`
+- Bundle ID: `com.serialnotes.app`
 - Audio output: timestamped session directories containing `system.wav` + `mic.wav` (48kHz mono float32) alongside a streaming `transcript.md`
-- Voice profile storage: `~/Library/Application Support/CerealNotes/voices/` — JSON + WAV pairs. Don't bake any other personal data into this directory.
+- Voice profile storage: `~/Library/Application Support/SerialNotes/voices/` — JSON + WAV pairs. Don't bake any other personal data into this directory.
 - Permissions reset when the `.app` path changes (different worktree = different path = TCC re-prompts). Expected.
 - New meeting prompts should extend `MeetingBannerController`; don't add `UNUserNotificationCenter` flows unless you've thought through Focus/DND filtering and notification permission UX.
 - Any feature that opens the mic outside a recording session must call `MeetingDetectionService.suspendDetection()` / `resumeDetection()` around its engine lifetime — otherwise it false-fires the banner.
 - Transcript post-processing (punctuation, anything else that mutates finalized text) belongs inside `TranscriptionService`'s EOU handlers, *before* `pendingEntries.append`. The 3-second flush delay (`flushOldEntries`) is enough headroom for async rewrites — do not add a separate post-write pass. Don't touch partial-transcript text; the live-partial UI is deliberately raw.
-- The test target `@testable import CerealNotes`, so keep testable code at `internal` visibility; `private` types cannot carry `@Generable` or other macro-expanded conformances (moved out of `FoundationModelsRewriter` for this reason).
+- The test target `@testable import SerialNotes`, so keep testable code at `internal` visibility; `private` types cannot carry `@Generable` or other macro-expanded conformances (moved out of `FoundationModelsRewriter` for this reason).

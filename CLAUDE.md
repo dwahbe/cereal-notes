@@ -48,13 +48,20 @@ Sources/
     SettingsView.swift                # Settings window (General + Voices tabs)
     RecordingState.swift              # Observable recording state + timer
     StorageSettings.swift             # Storage location persistence + NSOpenPanel
+    SummarySettings.swift             # Summary + action-items toggle persistence
     AudioCaptureService.swift         # Audio capture (process tap + SCK fallback)
     TranscriptionService.swift        # FluidAudio ASR + diarizer actor,
-                                      #   applies punctuation via TranscriptRewriter
+                                      #   applies punctuation via TranscriptRewriter,
+                                      #   splices summary + action items at endSession
     TranscriptRewriter.swift          # Foundation Models on-device LLM that restores
                                       #   punctuation + capitalization per EOU utterance,
                                       #   with a heuristic fallback when AI unavailable
-    TranscriptFormatter.swift         # Markdown transcript rendering
+    TranscriptSummarizer.swift        # Foundation Models on-device LLM that generates
+                                      #   the meeting summary + action items from the
+                                      #   finalized transcript at session end; returns
+                                      #   nil factory when Apple Intelligence is off
+    TranscriptFormatter.swift         # Markdown transcript rendering (header, entries,
+                                      #   summary + action-items sections)
     ModelDownloadState.swift          # Observable status for model prefetch
     MeetingDetectionService.swift     # Fuses NSWorkspace + CoreAudio mic signal
     MeetingBannerWindow.swift         # Floating NSPanel banner (primary prompt)
@@ -79,6 +86,8 @@ Tests/
     TranscriptionTests.swift          # FluidAudio ASR + diarizer smoke tests
     TranscriptRewriterTests.swift     # Heuristic rewriter + FM smoke test
                                       #   (FM smoke test gated by SERIAL_FM_TEST=1)
+    TranscriptSummarizerTests.swift   # Formatter + chunking + fake-summarizer wiring
+                                      #   tests + FM smoke test (gated by SERIAL_FM_TEST=1)
 ```
 
 ## Architecture
@@ -90,6 +99,7 @@ Tests/
 - **State**: `RecordingState` owns the `AudioCaptureService` and drives the UI. `StorageSettings` manages the output directory via UserDefaults. `VoiceProfileStore` holds saved enrollment profiles.
 - **Transcription**: [FluidAudio](https://github.com/FluidInference/FluidAudio) Parakeet streaming ASR + LS-EEND DIHARD III diarizer, both on-device. Models are cached in `~/Library/Application Support/FluidAudio/Models/`. Download is kicked off at app launch from `SerialNotesApp.init` (not popover open) so the banner can record without requiring the user to open the popover first. `RecordingState.start()` also awaits `downloadModelsIfNeeded()` as a safety net — idempotent, so no double-download.
 - **Punctuation + capitalization**: Parakeet emits raw lowercase with no punctuation. `TranscriptRewriter` closes the gap: each EOU callback in `TranscriptionService` spawns a detached rewrite task; the task awaits the rewriter and then appends the entry to `pendingEntries` on the actor. The production implementation (`FoundationModelsRewriter`) is an actor around Apple's on-device `LanguageModelSession` (macOS 26+) using a `@Generable` schema + 2s timeout + strict word-equality guard (lowercased-alphanumeric compare) to reject hallucinations. When Apple Intelligence is unavailable (disabled, ineligible hardware, model not ready) the factory returns `HeuristicRewriter` — capitalize first char, append `.` if missing. The rewriter only runs on finalized utterances.
+- **Summary + action items**: `TranscriptSummarizer` runs once at session end inside `TranscriptionService.endSession()` after both the streaming and high-accuracy paths have written their final file to disk. `FoundationModelsSummarizer` is an actor wrapping two `LanguageModelSession`s (one per task) with separate `@Generable` schemas (`MeetingSummary`, `GeneratedActionItemList`), a 15s per-call timeout, single-pass under 2500 words / map-reduce above, and dedup + sanitization on the output. The factory returns `nil` when Apple Intelligence is unavailable — there is **no heuristic fallback** because a fabricated summary is worse than none. The splice reads the finalized `transcript.md` back, inserts `## Summary` + `## Action items` sections between the header and the first speaker entry, and writes the file atomically. Both sections are toggled independently via `SummarySettings` (General tab + menu bar popover, both on by default).
 - **Voice enrollment**: `VoiceProfileStore` persists profiles to `~/Library/Application Support/SerialNotes/voices/` as `<uuid>.json` + `<uuid>.wav` pairs. `VoiceEnrollmentRecorder` captures a short mic clip with per-phrase silence detection (RMS threshold + hangover) and advances through three phrases. `VoiceEnrollmentFlowView` is the Face-ID-style guided UI. On session start, `RecordingState` hands enrollment clips to `TranscriptionService.startSession(enrollments:)`, which primes each diarizer so matching voices get named instead of labeled `You` / `Person N`.
 - **Detection suspend/resume**: any code that holds the mic for non-meeting purposes (currently just `VoiceEnrollmentRecorder`) must call `MeetingDetectionService.suspendDetection()` before engine start and `resumeDetection()` on stop. Otherwise enrollment audio would false-fire the "meeting detected" banner. Wiring lives in `SettingsView`'s `VoicesSettingsTab.onAppear`.
 - **Settings scene**: a standard SwiftUI `Settings { … }` scene (not a bespoke window). `SettingsWindowChrome` observes the hosting NSWindow's `willCloseNotification` and restores `NSApp.setActivationPolicy(.accessory)`; without this, clicking the gear flips the app to `.regular` and leaves it visible in Dock + Cmd-Tab after the window closes.
@@ -114,5 +124,5 @@ See **[DESIGN.md](DESIGN.md)** for all frontend and design decisions (Liquid Gla
 - Permissions reset when the `.app` path changes (different worktree = different path = TCC re-prompts). Expected.
 - New meeting prompts should extend `MeetingBannerController`; don't add `UNUserNotificationCenter` flows unless you've thought through Focus/DND filtering and notification permission UX.
 - Any feature that opens the mic outside a recording session must call `MeetingDetectionService.suspendDetection()` / `resumeDetection()` around its engine lifetime — otherwise it false-fires the banner.
-- Transcript post-processing (punctuation, anything else that mutates finalized text) belongs inside `TranscriptionService`'s EOU handlers. The 3-second flush delay (`flushOldEntries`) gives detached rewrite tasks headroom to complete before their entry's timestamp is flushed — do not add a separate post-write pass.
+- Transcript post-processing splits by scope: **per-utterance mutations** (punctuation, capitalization, anything that touches a single EOU's text) belong inside `TranscriptionService`'s EOU handlers — the 3-second flush delay (`flushOldEntries`) gives detached rewrite tasks headroom to complete before their entry's timestamp is flushed; do not add a separate per-entry post-write pass. **Whole-transcript passes** (summary, action items, anything that needs the full session) belong in `endSession()` after the file is finalized on disk, mirroring `spliceSummarySections` — read the file back, mutate, write atomically.
 - The test target `@testable import SerialNotes`, so keep testable code at `internal` visibility; `private` types cannot carry `@Generable` or other macro-expanded conformances (moved out of `FoundationModelsRewriter` for this reason).

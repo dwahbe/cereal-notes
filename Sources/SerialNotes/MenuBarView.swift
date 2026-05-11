@@ -1,11 +1,18 @@
+import FoundationModels
 import SwiftUI
 
 struct MenuBarView: View {
     @Environment(RecordingState.self) private var recordingState
     @Environment(StorageSettings.self) private var storageSettings
+    @Environment(SummarySettings.self) private var summarySettings
     @Environment(ModelDownloadState.self) private var modelDownloadState
     @Environment(MeetingDetectionService.self) private var meetingDetectionService
     @Environment(\.openSettings) private var openSettings
+
+    private var foundationModelsAvailable: Bool {
+        if case .available = SystemLanguageModel.default.availability { return true }
+        return false
+    }
 
     private func showSettings() {
         // .accessory apps don't front their Settings window automatically.
@@ -110,26 +117,96 @@ struct MenuBarView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
 
+        summaryControls
+
+        storageRow
+    }
+
+    private var storageRow: some View {
         Button(action: { storageSettings.pickFolder() }) {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Image(systemName: "folder")
                     .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Storage Location")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(storageSettings.storageLocationName)
-                        .font(.caption)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer()
+                    .frame(width: 18)
+                Text("Save To")
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 8)
+                Text(storageSettings.storageLocationName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 Image(systemName: "chevron.right")
-                    .font(.caption2)
+                    .font(.caption2.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.glass)
+        .buttonStyle(.plain)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(.white.opacity(0.08), lineWidth: 0.5)
+        )
+    }
+
+    @ViewBuilder
+    private var summaryControls: some View {
+        @Bindable var summary = summarySettings
+
+        VStack(spacing: 0) {
+            summaryToggleRow(
+                icon: "doc.text",
+                title: "Meeting Summary",
+                isOn: $summary.generateSummary
+            )
+            Divider()
+                .padding(.horizontal, 12)
+            summaryToggleRow(
+                icon: "checklist",
+                title: "Action Items",
+                isOn: $summary.generateActionItems
+            )
+        }
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(.white.opacity(0.08), lineWidth: 0.5)
+        )
+        .disabled(!foundationModelsAvailable)
+
+        if !foundationModelsAvailable {
+            Text("Summaries require Apple Intelligence")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func summaryToggleRow(
+        icon: String,
+        title: String,
+        isOn: Binding<Bool>
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            Text(title)
+                .font(.caption)
+            Spacer(minLength: 0)
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
+        .onTapGesture { isOn.wrappedValue.toggle() }
     }
 
     // MARK: - Recording

@@ -32,6 +32,32 @@ enum TranscriptFormatter {
         """
     }
 
+    /// Renders the summary + action items sections that go between the header
+    /// and the first speaker entry. Returns an empty string when both sections
+    /// are empty so callers can splice unconditionally.
+    static func summarySections(_ result: SummaryResult) -> String {
+        var out = ""
+        if !result.summary.isEmpty {
+            out += "## Summary\n\n"
+            for bullet in result.summary {
+                out += "- \(bullet)\n"
+            }
+            out += "\n"
+        }
+        if !result.actionItems.isEmpty {
+            out += "## Action items\n\n"
+            for item in result.actionItems {
+                if let owner = item.owner, !owner.isEmpty {
+                    out += "- [ ] **\(owner)** — \(item.task)\n"
+                } else {
+                    out += "- [ ] \(item.task)\n"
+                }
+            }
+            out += "\n"
+        }
+        return out
+    }
+
     static func entry(speaker: String, timestamp: TimeInterval, text: String) -> String {
         let body = readableBody(text)
         let prefix = "**\(speaker)** (\(formatTimestamp(timestamp)))"

@@ -1,4 +1,5 @@
 import AppKit
+import FoundationModels
 import SwiftUI
 
 struct SettingsView: View {
@@ -177,9 +178,17 @@ private struct OtherProfileRow: View {
 
 private struct GeneralSettingsTab: View {
     @Environment(StorageSettings.self) private var storageSettings
+    @Environment(SummarySettings.self) private var summarySettings
     @Environment(VoiceProfileStore.self) private var voiceStore
 
+    private var foundationModelsAvailable: Bool {
+        if case .available = SystemLanguageModel.default.availability { return true }
+        return false
+    }
+
     var body: some View {
+        @Bindable var summary = summarySettings
+
         Form {
             Section("Storage") {
                 HStack {
@@ -196,6 +205,24 @@ private struct GeneralSettingsTab: View {
                     Button("Change…") { storageSettings.pickFolder() }
                 }
             }
+
+            Section {
+                Toggle("Generate meeting summary", isOn: $summary.generateSummary)
+                Toggle("Generate action items", isOn: $summary.generateActionItems)
+            } header: {
+                Text("Summary")
+            } footer: {
+                if foundationModelsAvailable {
+                    Text("Added to the top of transcript.md after each recording. Runs on-device with Apple Intelligence.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Requires Apple Intelligence — turn it on in System Settings to enable summaries.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(!foundationModelsAvailable)
 
             Section("Voice Profiles") {
                 Button("Reveal in Finder") { voiceStore.revealInFinder() }

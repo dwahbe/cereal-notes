@@ -11,6 +11,7 @@ struct SerialNotesApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var recordingState: RecordingState
     @State private var storageSettings: StorageSettings
+    @State private var summarySettings: SummarySettings
     @State private var modelDownloadState: ModelDownloadState
     @State private var meetingDetectionService: MeetingDetectionService
     @State private var voiceProfileStore: VoiceProfileStore
@@ -18,11 +19,13 @@ struct SerialNotesApp: App {
     init() {
         let recording = RecordingState()
         let storage = StorageSettings()
+        let summary = SummarySettings()
         let voices = VoiceProfileStore()
         let detector = MeetingDetectionService(recordingState: recording)
         let modelState = ModelDownloadState(transcriptionService: recording.transcriptionService)
 
         recording.voiceProfileStore = voices
+        recording.summarySettings = summary
         recording.onRecordingChange = { [weak detector] in detector?.recordingStateChanged() }
         detector.onRecordRequested = { [weak recording, weak storage] in
             guard let recording, let storage else { return }
@@ -31,6 +34,7 @@ struct SerialNotesApp: App {
 
         _recordingState = State(initialValue: recording)
         _storageSettings = State(initialValue: storage)
+        _summarySettings = State(initialValue: summary)
         _modelDownloadState = State(initialValue: modelState)
         _meetingDetectionService = State(initialValue: detector)
         _voiceProfileStore = State(initialValue: voices)
@@ -46,6 +50,7 @@ struct SerialNotesApp: App {
             MenuBarView()
                 .environment(recordingState)
                 .environment(storageSettings)
+                .environment(summarySettings)
                 .environment(modelDownloadState)
                 .environment(meetingDetectionService)
                 .environment(voiceProfileStore)
@@ -62,6 +67,7 @@ struct SerialNotesApp: App {
             SettingsView()
                 .environment(voiceProfileStore)
                 .environment(storageSettings)
+                .environment(summarySettings)
                 .environment(meetingDetectionService)
         }
     }

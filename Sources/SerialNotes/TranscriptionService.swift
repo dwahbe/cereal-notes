@@ -149,7 +149,7 @@ actor TranscriptionService {
         }
     }
 
-    func endSession() async {
+    func endSession(summarySettings: SummarySettings.Snapshot = .disabled) async {
         for side in AudioSide.allCases {
             do {
                 if let text = try await sideStates[side]?.asr?.finish() {
@@ -173,35 +173,69 @@ actor TranscriptionService {
 
         let replacedWithHighAccuracyTranscript = await replaceTranscriptWithHighAccuracyVersion(header: finalHeader)
 
-        // Rewrite header with real duration when we keep the streaming transcript.
-        guard !replacedWithHighAccuracyTranscript else {
-            transcriptHandle = nil
-            sessionStart = nil
-            sessionDate = nil
-            sessionDirectory = nil
-            rewriter = nil
-            activeSessionID = nil
-
-            return
-        }
-
-        if let handle = transcriptHandle {
-            do {
-                try handle.seek(toOffset: 0)
-                handle.write(Data(finalHeader.utf8))
-            } catch {
-                onError?(error)
+        // Streaming path: rewrite header with real duration in place, then close
+        // the handle so the summary step can read the final file back.
+        if !replacedWithHighAccuracyTranscript {
+            if let handle = transcriptHandle {
+                do {
+                    try handle.seek(toOffset: 0)
+                    handle.write(Data(finalHeader.utf8))
+                } catch {
+                    onError?(error)
+                }
             }
+            try? transcriptHandle?.close()
+        }
+        transcriptHandle = nil
+
+        // Both paths leave a finalized transcript on disk — splice summary +
+        // action items between the header and the first entry when requested.
+        if let directory = sessionDirectory {
+            await spliceSummarySections(
+                sessionDirectory: directory,
+                header: finalHeader,
+                settings: summarySettings
+            )
         }
 
-        try? transcriptHandle?.close()
-        transcriptHandle = nil
         sessionStart = nil
         sessionDate = nil
         sessionDirectory = nil
         rewriter = nil
         activeSessionID = nil
+    }
 
+    private func spliceSummarySections(
+        sessionDirectory: URL,
+        header: String,
+        settings: SummarySettings.Snapshot
+    ) async {
+        guard settings.generateSummary || settings.generateActionItems else { return }
+        guard let summarizer = TranscriptSummarizerFactory.make() else { return }
+
+        let transcriptURL = sessionDirectory.appendingPathComponent("transcript.md")
+        guard let fileText = try? String(contentsOf: transcriptURL, encoding: .utf8) else { return }
+        guard fileText.hasPrefix(header) else { return }
+
+        let body = String(fileText.dropFirst(header.count))
+        let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBody.isEmpty else { return }
+
+        let result = await summarizer.summarize(
+            transcript: trimmedBody,
+            generateSummary: settings.generateSummary,
+            generateActionItems: settings.generateActionItems
+        )
+
+        let sections = TranscriptFormatter.summarySections(result)
+        guard !sections.isEmpty else { return }
+
+        let newContent = header + sections + body
+        do {
+            try newContent.write(to: transcriptURL, atomically: true, encoding: String.Encoding.utf8)
+        } catch {
+            NSLog("[SerialNotes/Summary] failed to write spliced transcript: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Audio Input

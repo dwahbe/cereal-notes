@@ -1,0 +1,150 @@
+import Foundation
+import Testing
+
+@testable import SerialNotes
+
+@Suite("Transcript Summarizer")
+struct TranscriptSummarizerTests {
+    @Test("Formatter: renders summary bullets")
+    func formatterSummaryBullets() {
+        let result = SummaryResult(
+            summary: ["Discussed the roadmap.", "Decided to ship in Q3."],
+            actionItems: []
+        )
+        let out = TranscriptFormatter.summarySections(result)
+
+        #expect(out.contains("## Summary"))
+        #expect(out.contains("- Discussed the roadmap."))
+        #expect(out.contains("- Decided to ship in Q3."))
+        #expect(!out.contains("## Action items"))
+    }
+
+    @Test("Formatter: renders action items with and without owner")
+    func formatterActionItems() {
+        let result = SummaryResult(
+            summary: [],
+            actionItems: [
+                ActionItem(task: "Send the design doc by Friday", owner: "Dylan"),
+                ActionItem(task: "Schedule a follow-up with platform", owner: nil)
+            ]
+        )
+        let out = TranscriptFormatter.summarySections(result)
+
+        #expect(out.contains("## Action items"))
+        #expect(out.contains("- [ ] **Dylan** — Send the design doc by Friday"))
+        #expect(out.contains("- [ ] Schedule a follow-up with platform"))
+        #expect(!out.contains("## Summary"))
+    }
+
+    @Test("Formatter: empty result yields empty string")
+    func formatterEmpty() {
+        #expect(TranscriptFormatter.summarySections(.empty) == "")
+    }
+
+    @Test("Formatter: renders both sections in order")
+    func formatterBothSections() {
+        let result = SummaryResult(
+            summary: ["A topic."],
+            actionItems: [ActionItem(task: "Do a thing", owner: nil)]
+        )
+        let out = TranscriptFormatter.summarySections(result)
+
+        let summaryRange = out.range(of: "## Summary")
+        let actionsRange = out.range(of: "## Action items")
+        #expect(summaryRange != nil)
+        #expect(actionsRange != nil)
+        if let s = summaryRange, let a = actionsRange {
+            #expect(s.lowerBound < a.lowerBound, "Summary should come before action items")
+        }
+    }
+
+    @Test("Chunking: short transcript stays single chunk")
+    func chunkingShortTranscript() {
+        let text = "**You** (00:00:01): hello there\n\n**You** (00:00:05): how are you"
+        let chunks = SummarizerTextProcessing.speakerTurnChunks(text, maxWords: 100)
+        #expect(chunks.count == 1)
+    }
+
+    @Test("Chunking: splits on speaker turns when over word budget")
+    func chunkingSplitsByTurn() {
+        let turn1 = "**You** (00:00:01): " + Array(repeating: "alpha", count: 60).joined(separator: " ")
+        let turn2 = "**Person 2** (00:00:30): " + Array(repeating: "beta", count: 60).joined(separator: " ")
+        let turn3 = "**You** (00:01:00): " + Array(repeating: "gamma", count: 60).joined(separator: " ")
+        let text = [turn1, turn2, turn3].joined(separator: "\n\n")
+
+        let chunks = SummarizerTextProcessing.speakerTurnChunks(text, maxWords: 100)
+        #expect(chunks.count >= 2, "Expected at least 2 chunks, got \(chunks.count)")
+        for chunk in chunks {
+            #expect(SummarizerTextProcessing.wordCount(chunk) > 0)
+        }
+    }
+
+    @Test("Fake summarizer: respects per-section flags")
+    func fakeSummarizerFlags() async {
+        let summarizer = FakeSummarizer(
+            summary: ["only summary"],
+            actionItems: [ActionItem(task: "only action", owner: nil)]
+        )
+
+        let onlySummary = await summarizer.summarize(
+            transcript: "x",
+            generateSummary: true,
+            generateActionItems: false
+        )
+        #expect(onlySummary.summary == ["only summary"])
+        #expect(onlySummary.actionItems.isEmpty)
+
+        let onlyActions = await summarizer.summarize(
+            transcript: "x",
+            generateSummary: false,
+            generateActionItems: true
+        )
+        #expect(onlyActions.summary.isEmpty)
+        #expect(onlyActions.actionItems.count == 1)
+
+        let neither = await summarizer.summarize(
+            transcript: "x",
+            generateSummary: false,
+            generateActionItems: false
+        )
+        #expect(neither.isEmpty)
+    }
+
+    /// FM smoke test gated by SERIAL_FM_TEST=1, mirroring the rewriter test.
+    @Test(
+        "FoundationModels summarizer smoke test (gated by SERIAL_FM_TEST)",
+        .enabled(if: ProcessInfo.processInfo.environment["SERIAL_FM_TEST"] == "1")
+    )
+    func foundationModelsSmokeTest() async {
+        let summarizer = FoundationModelsSummarizer()
+        let transcript = """
+            **You** (00:00:01): We need to review the launch checklist before Friday.
+            **Person 2** (00:00:15): I will write up the rollout plan and share it tomorrow.
+            **You** (00:00:30): Great, and I will sync with marketing.
+            """
+        let result = await summarizer.summarize(
+            transcript: transcript,
+            generateSummary: true,
+            generateActionItems: true
+        )
+
+        #expect(!result.summary.isEmpty || !result.actionItems.isEmpty,
+                "Expected at least one section populated, got empty result")
+    }
+}
+
+private struct FakeSummarizer: TranscriptSummarizer {
+    let summary: [String]
+    let actionItems: [ActionItem]
+
+    func summarize(
+        transcript: String,
+        generateSummary: Bool,
+        generateActionItems: Bool
+    ) async -> SummaryResult {
+        SummaryResult(
+            summary: generateSummary ? summary : [],
+            actionItems: generateActionItems ? actionItems : []
+        )
+    }
+}

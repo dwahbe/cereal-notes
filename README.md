@@ -1,6 +1,6 @@
 # Serial Notes
 
-A minimal macOS menu bar app that captures meeting audio, transcribes it locally, and exports clean Markdown to the notes app of your choice.
+A minimal macOS menu bar app that captures meeting audio, transcribes it locally, generates a summary + action items with Apple Intelligence, and exports clean Markdown to the notes app of your choice.
 
 **No accounts. No cloud dependency. No lock-in.**
 
@@ -8,14 +8,15 @@ A minimal macOS menu bar app that captures meeting audio, transcribes it locally
 
 1. **Hidden.** Doesn't bother the user and doesn't show up in meeting apps.
 2. **Safe.** Data never leaves your laptop unless you want it to.
-3. **Simple.** Serial Notes produces a high quality meeting transcript. What you do with it afterwards is up to you.
+3. **Simple.** Serial Notes produces a high-quality meeting transcript with an optional summary + action items. What you do with them afterwards is up to you.
 
 ## How It Works
 
 1. **Detect** — Notices when a meeting app (Zoom, Meet, Teams, FaceTime, Slack, Webex, Discord) starts using the mic and offers a one-click record banner.
 2. **Capture** — Records system audio via a CoreAudio process tap (no screen-recording prompt), with a ScreenCaptureKit fallback. Mic is captured in parallel via AVAudioEngine.
-3. **Transcribe** — Runs locally on-device using [FluidAudio](https://github.com/FluidInference/FluidAudio): Parakeet streaming ASR for real-time text, LS-EEND for speaker diarization. Audio never leaves your machine.
-4. **Export** — Writes a structured `transcript.md` alongside the raw `system.wav` + `mic.wav` into a session folder in your chosen storage location (Obsidian vault, iCloud, any folder).
+3. **Transcribe** — Runs locally on-device using [FluidAudio](https://github.com/FluidInference/FluidAudio): Parakeet streaming ASR for real-time text, LS-EEND for speaker diarization. Apple's on-device Foundation Models (when Apple Intelligence is on) restore punctuation + capitalization as each utterance lands.
+4. **Summarize** — At session end, the same on-device Foundation Models generate a 3–6 bullet meeting summary and a list of action items with owners. Both sections are independently togglable; if Apple Intelligence isn't available the step is skipped silently.
+5. **Export** — Writes a structured `transcript.md` (header → summary → action items → speaker entries) alongside the raw `system.wav` + `mic.wav` into a session folder in your chosen storage location (Obsidian vault, iCloud, any folder).
 
 ## Example Output
 
@@ -27,6 +28,18 @@ duration: 47m
 
 # Meeting — 2026-04-24 at 10:00 AM
 
+## Summary
+
+- Walked through onboarding flow concerns raised by the support team.
+- Agreed to delay the activation prompt until day two and ship a fix this week.
+- Reviewed Q3 launch checklist — marketing sync still outstanding.
+
+## Action items
+
+- [ ] **You** — Send the updated design doc by Friday
+- [ ] **Person 1** — Schedule a follow-up with the platform team
+- [ ] Update the launch checklist with the new activation timing
+
 **You** (00:00:00): Alright, let's get started...
 **Person 1** (00:00:15): I wanted to flag something on the onboarding flow...
 **You** (00:00:42): Yeah, I saw that too — let's dig in.
@@ -35,7 +48,7 @@ duration: 47m
 Each session lives in its own folder:
 
 ```
-~/Serial Notes/2026-04-24 at 10.00.00 AM/
+~/Documents/SerialNotes/2026-04-24 at 10.00.00 AM/
 ├── transcript.md     # what you share
 ├── system.wav        # raw meeting-side audio
 └── mic.wav           # raw mic audio
@@ -48,6 +61,7 @@ Each session lives in its own folder:
 - Xcode 26+ (Swift tools 6.2)
 - Microphone + System Audio Recording permissions
 - ~1 GB free disk space for transcription models (downloaded from Hugging Face on first launch)
+- Apple Intelligence (optional) — enables punctuation restoration, meeting summaries, and action items. The app works without it; those steps are skipped.
 
 ## Running locally
 
@@ -67,16 +81,8 @@ On first launch, models are prefetched in the background from Hugging Face (~1 G
 - **Audio Capture:** CoreAudio process tap (primary) → ScreenCaptureKit fallback; AVAudioEngine for mic
 - **Transcription:** [FluidAudio](https://github.com/FluidInference/FluidAudio) — Parakeet EOU streaming ASR (160ms chunks, on-device CoreML)
 - **Diarization:** FluidAudio LS-EEND (DIHARD III) on both mic and system streams
+- **LLM post-processing:** Apple Foundation Models (on-device, macOS 26+) via `@Generable` schemas — per-utterance punctuation/capitalization + end-of-session summary and action items
 - **No Electron. No web views. No networking after model download.**
-
-## Roadmap
-
-| Version | Focus                                                                     |
-|---------|---------------------------------------------------------------------------|
-| v0.1    | Menu bar shell, audio capture, local transcription, diarization           |
-| v0.2    | AI summaries, action items, custom prompts                                |
-| v0.3    | Global hotkeys, auto-export, Ollama support                               |
-| v0.4    | Cross-session speaker identity, keyword biasing, Homebrew cask            |
 
 ## Non-Goals
 
@@ -85,9 +91,9 @@ On first launch, models are prefetched in the background from Hugging Face (~1 G
 
 ## Privacy
 
-- All transcription runs locally on-device
+- All transcription, punctuation restoration, summarization, and action-item extraction run locally on-device
 - No analytics, no telemetry
-- Models are downloaded once from Hugging Face; after that, nothing leaves your machine
+- FluidAudio models are downloaded once from Hugging Face; Apple's Foundation Models base model is managed by the OS. After both are present, nothing leaves your machine
 - Audio is retained indefinitely on-device (delete session folders to clean up)
 
 ## License

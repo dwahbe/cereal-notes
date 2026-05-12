@@ -26,6 +26,7 @@ struct SerialNotesApp: App {
 
         recording.voiceProfileStore = voices
         recording.summarySettings = summary
+        recording.storageSettings = storage
         recording.onRecordingChange = { [weak detector] in detector?.recordingStateChanged() }
         detector.onRecordRequested = { [weak recording, weak storage] in
             guard let recording, let storage else { return }

@@ -149,7 +149,10 @@ actor TranscriptionService {
         }
     }
 
-    func endSession(summarySettings: SummarySettings.Snapshot = .disabled) async {
+    func endSession(
+        summarySettings: SummarySettings.Snapshot = .disabled,
+        keepAudioFiles: Bool = true
+    ) async {
         for side in AudioSide.allCases {
             do {
                 if let text = try await sideStates[side]?.asr?.finish() {
@@ -196,6 +199,10 @@ actor TranscriptionService {
                 header: finalHeader,
                 settings: summarySettings
             )
+            if !keepAudioFiles {
+                // Must run after high-accuracy ASR and summary splice — both read the raw audio.
+                deleteAudioFiles(in: directory)
+            }
         }
 
         sessionStart = nil
@@ -203,6 +210,20 @@ actor TranscriptionService {
         sessionDirectory = nil
         rewriter = nil
         activeSessionID = nil
+    }
+
+    private func deleteAudioFiles(in directory: URL) {
+        let fm = FileManager.default
+        for name in ["system.wav", "mic.wav"] {
+            let url = directory.appendingPathComponent(name)
+            do {
+                try fm.removeItem(at: url)
+            } catch let error as CocoaError where error.code == .fileNoSuchFile {
+                // Already absent (e.g., mic permission denied so mic.wav never opened) — fine.
+            } catch {
+                NSLog("[SerialNotes/Transcription] failed to delete \(name): \(error.localizedDescription)")
+            }
+        }
     }
 
     private func spliceSummarySections(

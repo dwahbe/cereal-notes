@@ -47,7 +47,7 @@ Sources/
     MenuBarView.swift                 # Popover UI (idle + recording states)
     SettingsView.swift                # Settings window (General + Voices tabs)
     RecordingState.swift              # Observable recording state + timer
-    StorageSettings.swift             # Storage location persistence + NSOpenPanel
+    StorageSettings.swift             # Storage location + saveAudioFiles toggle persistence
     SummarySettings.swift             # Summary + action-items toggle persistence
     AudioCaptureService.swift         # Audio capture (process tap + SCK fallback)
     TranscriptionService.swift        # FluidAudio ASR + diarizer actor,
@@ -119,7 +119,7 @@ See **[DESIGN.md](DESIGN.md)** for all frontend and design decisions (Liquid Gla
 - `Info.plist` is a real file copied into `.app/Contents/` by `build-app.sh` (no linker `__info_plist` hack)
 - `SerialNotes.entitlements` is applied via `codesign --entitlements` in `build-app.sh` — currently only `com.apple.security.device.audio-input`
 - Bundle ID: `com.serialnotes.app`
-- Audio output: timestamped session directories containing `system.wav` + `mic.wav` (48kHz mono float32) alongside a streaming `transcript.md`
+- Audio output: timestamped session directories containing `system.wav` + `mic.wav` (48kHz mono float32) alongside a streaming `transcript.md`. The WAVs are always written during capture (the high-accuracy second-pass ASR and summary splice both read them), then deleted at the end of `endSession` when `StorageSettings.saveAudioFiles` is off.
 - Voice profile storage: `~/Library/Application Support/SerialNotes/voices/` — JSON + WAV pairs. Don't bake any other personal data into this directory.
 - Permissions reset when the `.app` path changes (different worktree = different path = TCC re-prompts). Expected.
 - New meeting prompts should extend `MeetingBannerController`; don't add `UNUserNotificationCenter` flows unless you've thought through Focus/DND filtering and notification permission UX.

@@ -123,29 +123,42 @@ struct MenuBarView: View {
     }
 
     private var storageRow: some View {
-        Button(action: { storageSettings.pickFolder() }) {
-            HStack(spacing: 10) {
-                Image(systemName: "folder")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18)
-                Text("Save To")
-                    .font(.caption)
-                    .foregroundStyle(.primary)
-                Spacer(minLength: 8)
-                Text(storageSettings.storageLocationName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.tertiary)
+        @Bindable var storage = storageSettings
+
+        return VStack(spacing: 0) {
+            Button(action: { storageSettings.pickFolder() }) {
+                HStack(spacing: 10) {
+                    Image(systemName: "folder")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18)
+                    Text("Save To")
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 8)
+                    Text(storageSettings.storageLocationName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            Divider()
+                .padding(.horizontal, 12)
+
+            toggleRow(
+                icon: "waveform",
+                title: "Save Audio Files",
+                isOn: $storage.saveAudioFiles
+            )
         }
-        .buttonStyle(.plain)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -158,14 +171,14 @@ struct MenuBarView: View {
         @Bindable var summary = summarySettings
 
         VStack(spacing: 0) {
-            summaryToggleRow(
+            toggleRow(
                 icon: "doc.text",
                 title: "Meeting Summary",
                 isOn: $summary.generateSummary
             )
             Divider()
                 .padding(.horizontal, 12)
-            summaryToggleRow(
+            toggleRow(
                 icon: "checklist",
                 title: "Action Items",
                 isOn: $summary.generateActionItems
@@ -186,7 +199,7 @@ struct MenuBarView: View {
         }
     }
 
-    private func summaryToggleRow(
+    private func toggleRow(
         icon: String,
         title: String,
         isOn: Binding<Bool>

@@ -82,6 +82,10 @@ private struct VoicesSettingsTab: View {
                 Text("Known People")
             }
 
+            Section("Voice Profiles") {
+                Button("Reveal in Finder") { voiceStore.revealInFinder() }
+            }
+
             if let error = errorMessage {
                 Text(error)
                     .font(.caption)
@@ -179,7 +183,6 @@ private struct OtherProfileRow: View {
 private struct GeneralSettingsTab: View {
     @Environment(StorageSettings.self) private var storageSettings
     @Environment(SummarySettings.self) private var summarySettings
-    @Environment(VoiceProfileStore.self) private var voiceStore
 
     private var foundationModelsAvailable: Bool {
         if case .available = SystemLanguageModel.default.availability { return true }
@@ -188,9 +191,10 @@ private struct GeneralSettingsTab: View {
 
     var body: some View {
         @Bindable var summary = summarySettings
+        @Bindable var storage = storageSettings
 
         Form {
-            Section("Storage") {
+            Section {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(storageSettings.storageLocationName)
@@ -204,6 +208,13 @@ private struct GeneralSettingsTab: View {
                     Spacer()
                     Button("Change…") { storageSettings.pickFolder() }
                 }
+                Toggle("Save audio files", isOn: $storage.saveAudioFiles)
+            } header: {
+                Text("Storage")
+            } footer: {
+                Text("When off, system.wav and mic.wav are removed once the transcript is finalized. Only transcript.md is kept.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -223,10 +234,6 @@ private struct GeneralSettingsTab: View {
                 }
             }
             .disabled(!foundationModelsAvailable)
-
-            Section("Voice Profiles") {
-                Button("Reveal in Finder") { voiceStore.revealInFinder() }
-            }
         }
         .formStyle(.grouped)
         .padding()

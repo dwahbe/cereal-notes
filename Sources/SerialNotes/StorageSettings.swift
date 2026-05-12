@@ -4,10 +4,17 @@ import Foundation
 @MainActor @Observable
 final class StorageSettings {
     private static let storageKey = "storageLocation"
+    private static let saveAudioFilesKey = "storage.saveAudioFiles"
 
     var storageLocation: URL {
         didSet {
             UserDefaults.standard.set(storageLocation.path(percentEncoded: false), forKey: Self.storageKey)
+        }
+    }
+
+    var saveAudioFiles: Bool {
+        didSet {
+            UserDefaults.standard.set(saveAudioFiles, forKey: Self.saveAudioFilesKey)
         }
     }
 
@@ -16,11 +23,13 @@ final class StorageSettings {
     }
 
     init() {
-        if let path = UserDefaults.standard.string(forKey: Self.storageKey) {
+        let defaults = UserDefaults.standard
+        if let path = defaults.string(forKey: Self.storageKey) {
             self.storageLocation = URL(fileURLWithPath: path)
         } else {
             self.storageLocation = Self.defaultLocation
         }
+        self.saveAudioFiles = defaults.object(forKey: Self.saveAudioFilesKey) as? Bool ?? true
     }
 
     private static var defaultLocation: URL {

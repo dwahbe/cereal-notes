@@ -9,6 +9,7 @@ final class RecordingState {
     @ObservationIgnored var onRecordingChange: (@MainActor () -> Void)?
     @ObservationIgnored weak var voiceProfileStore: VoiceProfileStore?
     @ObservationIgnored weak var summarySettings: SummarySettings?
+    @ObservationIgnored weak var storageSettings: StorageSettings?
 
     private var timer: Timer?
     private var startDate: Date?
@@ -99,11 +100,15 @@ final class RecordingState {
         currentSessionDir = nil
         onRecordingChange?()
         let summarySnapshot = summarySettings?.snapshot() ?? .disabled
+        let keepAudioFiles = storageSettings?.saveAudioFiles ?? true
         Task { [weak self] in
             guard let self else { return }
             await self.stopCapture()
             let stats = self.captureService.currentStats()
-            await self.transcriptionService.endSession(summarySettings: summarySnapshot)
+            await self.transcriptionService.endSession(
+                summarySettings: summarySnapshot,
+                keepAudioFiles: keepAudioFiles
+            )
             self.finalizeSession(
                 sessionDir: sessionDir,
                 sessionStart: sessionStart,

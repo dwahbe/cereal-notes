@@ -54,6 +54,8 @@ Each session lives in its own folder:
 └── mic.wav           # raw mic audio
 ```
 
+Don't need the raw audio? Turn **Save Audio Files** off in Settings → General (or the menu bar popover) and the WAVs are removed once the transcript is finalized — `transcript.md` is all that's left.
+
 ## Requirements
 
 - macOS 26+ (Tahoe)

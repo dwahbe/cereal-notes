@@ -1,5 +1,5 @@
 import Foundation
-import FoundationModels
+@preconcurrency import FoundationModels
 
 protocol TranscriptRewriter: Sendable {
     /// Rewrite an ASR utterance with restored punctuation + capitalization.
@@ -445,9 +445,11 @@ enum TranscriptTextProcessing {
     }
 }
 
-private struct TimeoutError: Error {}
+/// Shared across rewriter + summarizer; both run on-device LanguageModelSessions
+/// that can hang indefinitely if the model stalls.
+struct TimeoutError: Error {}
 
-private func withTimeout<T: Sendable>(
+func withTimeout<T: Sendable>(
     _ duration: Duration,
     operation: @Sendable @escaping () async throws -> T
 ) async throws -> T {

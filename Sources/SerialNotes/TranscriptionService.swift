@@ -26,6 +26,12 @@ actor TranscriptionService {
     private var sessionDate: Date?
     private var sessionDirectory: URL?
     private var rewriter: (any TranscriptRewriter)?
+    /// Constructed at session start when the user has summary or action items
+    /// enabled, so the underlying LanguageModelSessions can prewarm during the
+    /// recording instead of paying ~200–500ms cold-start each at session end.
+    /// Falls through to lazy construction in `spliceSummarySections` if the
+    /// user toggled summary on after recording started.
+    private var summarizer: (any TranscriptSummarizer)?
     private var activeSessionID: UUID?
     private var activeRewriteTaskCount = 0
     /// Timestamps of utterances whose rewrite is still in flight. `flushOldEntries`
@@ -33,6 +39,10 @@ actor TranscriptionService {
     /// older utterance can still land in `pendingEntries` before its slot flushes.
     private var inflightRewriteTimestamps: [TimeInterval] = []
     private var rewriteDrainContinuations: [CheckedContinuation<Void, Never>] = []
+    /// Handles for in-flight rewrite tasks. Drained on session end so a wedged
+    /// Foundation Models call can't keep running into the next session.
+    private var rewriteTasks: [Task<Void, Never>] = []
+    private static let rewriteDrainTimeout: Duration = .seconds(5)
     private var cachedFinalAsrModels: AsrModels?
     private var finalAsrModelsTask: Task<AsrModels, Error>?
 
@@ -80,7 +90,8 @@ actor TranscriptionService {
     func startSession(
         sessionDirectory: URL,
         sessionStart: Date,
-        enrollments: [EnrollmentClip] = []
+        enrollments: [EnrollmentClip] = [],
+        summarySettings: SummarySettings.Snapshot = .disabled
     ) async throws {
         guard modelsLoaded else {
             throw TranscriptionError.modelsNotLoaded
@@ -94,6 +105,7 @@ actor TranscriptionService {
         activeSessionID = UUID()
         activeRewriteTaskCount = 0
         inflightRewriteTimestamps.removeAll()
+        rewriteTasks.removeAll()
         resumeRewriteDrainContinuations()
 
         // Prime diarizers with saved voice profiles so known speakers get named.
@@ -120,10 +132,27 @@ actor TranscriptionService {
         streamingEntrySources = []
         lastFlushedTimestamp = 0
 
+        // The EOU callbacks installed below dispatch into `handleUtterance`,
+        // which reads `self.rewriter`. Assign the rewriter (and any prewarm)
+        // before installing the callbacks so the first utterance can never see
+        // a nil rewriter — a future reorder would silently regress to heuristic
+        // punctuation on session start.
         let newRewriter = TranscriptRewriterFactory.make()
         rewriter = newRewriter
         if let fm = newRewriter as? FoundationModelsRewriter {
             Task.detached { await fm.prewarm() }
+        }
+
+        // Prewarm summarizer in parallel — the real call lands at session end,
+        // but loading the LanguageModelSessions during recording hides
+        // ~200–500ms of cold-start each from the user-visible "Generating
+        // summary…" wait.
+        if summarySettings.generateSummary || summarySettings.generateActionItems,
+           let newSummarizer = TranscriptSummarizerFactory.make() {
+            summarizer = newSummarizer
+            Task.detached { await newSummarizer.prewarm() }
+        } else {
+            summarizer = nil
         }
 
         let transcriptURL = sessionDirectory.appendingPathComponent("transcript.md")
@@ -136,7 +165,7 @@ actor TranscriptionService {
         let header = TranscriptFormatter.header(date: sessionStart, duration: 0)
         handle.write(Data(header.utf8))
 
-        // ASR callbacks
+        // ASR callbacks (rewriter must already be assigned — see comment above).
         let micAsr = sideStates[.mic]?.asr
         let systemAsr = sideStates[.system]?.asr
         await micAsr?.setEouCallback { [weak self] text in
@@ -209,6 +238,7 @@ actor TranscriptionService {
         sessionDate = nil
         sessionDirectory = nil
         rewriter = nil
+        summarizer = nil
         activeSessionID = nil
     }
 
@@ -232,7 +262,9 @@ actor TranscriptionService {
         settings: SummarySettings.Snapshot
     ) async {
         guard settings.generateSummary || settings.generateActionItems else { return }
-        guard let summarizer = TranscriptSummarizerFactory.make() else { return }
+        // Prefer the prewarmed summarizer from startSession; fall back to a
+        // fresh one if the user enabled summary after recording started.
+        guard let summarizer = summarizer ?? TranscriptSummarizerFactory.make() else { return }
 
         let transcriptURL = sessionDirectory.appendingPathComponent("transcript.md")
         guard let fileText = try? String(contentsOf: transcriptURL, encoding: .utf8) else { return }
@@ -241,6 +273,13 @@ actor TranscriptionService {
         let body = String(fileText.dropFirst(header.count))
         let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedBody.isEmpty else { return }
+
+        // Idempotency: if a previous endSession (or future regenerate-summary
+        // call) already spliced sections in, skip rather than prepending a
+        // second set and re-running FM on a transcript that already has them.
+        if body.contains("## Summary\n") || body.contains("## Action items\n") {
+            return
+        }
 
         let result = await summarizer.summarize(
             transcript: trimmedBody,
@@ -355,12 +394,19 @@ actor TranscriptionService {
         let rewriter = rewriter
         activeRewriteTaskCount += 1
         inflightRewriteTimestamps.append(timestamp)
-        Task.detached { [weak self] in
+        let task = Task.detached { [weak self] in
             let restored = await rewriter?.rewrite(text) ?? text
+            // If endSession cancelled us mid-rewrite, the entry is still valid
+            // (heuristic punctuation kicked in inside the rewriter on
+            // cancellation), but skip the actor write — the session is already
+            // tearing down and we don't want to race the splice or final
+            // render. The drain has already accounted for our slot.
+            if Task.isCancelled { return }
             let entry = TranscriptEntry(source: source, speaker: speaker, text: restored, timestamp: timestamp)
             await self?.appendRewrittenEntry(entry, sessionID: sessionID)
             await self?.rewriteTaskFinished(sessionID: sessionID)
         }
+        rewriteTasks.append(task)
     }
 
     private func appendRewrittenEntry(_ entry: TranscriptEntry, sessionID: UUID) {
@@ -380,10 +426,54 @@ actor TranscriptionService {
     }
 
     private func drainRewriteTasks() async {
-        guard activeRewriteTaskCount > 0 else { return }
+        guard activeRewriteTaskCount > 0 else {
+            rewriteTasks.removeAll()
+            return
+        }
+
+        // Race the natural drain against a hard timeout. Drain resumes when
+        // every detached rewrite calls `rewriteTaskFinished`. The timeout is
+        // a safety net so a wedged on-device FM call can't hang the user's
+        // "Stop" press indefinitely. On timeout we cancel the remaining tasks
+        // and resume any waiting continuations so endSession can proceed.
+        let timedOut = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { [weak self] in
+                await self?.awaitNaturalDrain()
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: Self.rewriteDrainTimeout)
+                return true
+            }
+            defer { group.cancelAll() }
+            return await group.next() ?? false
+        }
+
+        if timedOut {
+            NSLog("[SerialNotes/Transcription] rewrite drain timed out after %.1fs — cancelling %d pending task(s)",
+                  Double(Self.rewriteDrainTimeout.components.seconds),
+                  activeRewriteTaskCount)
+            cancelOutstandingRewriteTasks()
+        } else {
+            rewriteTasks.removeAll()
+        }
+    }
+
+    private func awaitNaturalDrain() async {
         await withCheckedContinuation { continuation in
             rewriteDrainContinuations.append(continuation)
         }
+    }
+
+    private func cancelOutstandingRewriteTasks() {
+        for task in rewriteTasks { task.cancel() }
+        rewriteTasks.removeAll()
+        // The cancelled detached tasks short-circuit before calling
+        // rewriteTaskFinished, so reset the bookkeeping inline and resume
+        // anything still waiting on the drain continuation.
+        activeRewriteTaskCount = 0
+        inflightRewriteTimestamps.removeAll()
+        resumeRewriteDrainContinuations()
     }
 
     private func rewriteTaskFinished(sessionID: UUID) {
@@ -779,84 +869,14 @@ private final class SideState {
     }
 }
 
-private struct TranscriptEntry: Comparable, Sendable {
-    let source: AudioSide
-    let speaker: String
-    let text: String
-    let timestamp: TimeInterval
-
-    static func < (lhs: Self, rhs: Self) -> Bool {
-        if lhs.timestamp == rhs.timestamp {
-            return lhs.source.sortOrder < rhs.source.sortOrder
-        }
-        return lhs.timestamp < rhs.timestamp
-    }
-}
-
 private struct RenderedTranscript {
     let text: String
     let entryCount: Int
     let sources: Set<AudioSide>
 }
 
-private struct EchoSuppressionContext {
-    private var systemEntries: [TranscriptEntry] = []
-    private var systemWords: [String] = []
-    private var systemBigrams: Set<String> = []
-    private var systemTrigrams: Set<String> = []
-
-    mutating func reset() {
-        systemEntries = []
-        systemWords = []
-        systemBigrams = []
-        systemTrigrams = []
-    }
-
-    mutating func recordSystemEntry(
-        _ entry: TranscriptEntry,
-        lookbackSeconds: TimeInterval,
-        maxEntries: Int
-    ) {
-        systemEntries.append(entry)
-        pruneEntries(relativeTo: entry.timestamp, lookbackSeconds: lookbackSeconds)
-        if systemEntries.count > maxEntries {
-            systemEntries.removeFirst(systemEntries.count - maxEntries)
-        }
-        rebuildCache()
-    }
-
-    mutating func shouldSuppressMicEntry(
-        _ entry: TranscriptEntry,
-        lookbackSeconds: TimeInterval
-    ) -> Bool {
-        if pruneEntries(relativeTo: entry.timestamp, lookbackSeconds: lookbackSeconds) {
-            rebuildCache()
-        }
-        return TranscriptTextProcessing.isLikelyEcho(
-            micText: entry.text,
-            systemWords: systemWords,
-            systemBigrams: systemBigrams,
-            systemTrigrams: systemTrigrams
-        )
-    }
-
-    @discardableResult
-    private mutating func pruneEntries(
-        relativeTo timestamp: TimeInterval,
-        lookbackSeconds: TimeInterval
-    ) -> Bool {
-        let cutoff = timestamp - lookbackSeconds
-        let originalCount = systemEntries.count
-        systemEntries.removeAll { $0.timestamp < cutoff }
-        return systemEntries.count != originalCount
-    }
-
-    private mutating func rebuildCache() {
-        systemWords = systemEntries.flatMap { TranscriptTextProcessing.normalizedWords($0.text) }
-        systemBigrams = TranscriptTextProcessing.shingles(from: systemWords, size: 2)
-        systemTrigrams = TranscriptTextProcessing.shingles(from: systemWords, size: 3)
-    }
-}
+// TranscriptEntry + EchoSuppressionContext live in EchoSuppressionContext.swift —
+// both the streaming pipeline (this actor) and the final-render pass need them.
 
 enum TranscriptionError: LocalizedError {
     case modelsNotLoaded

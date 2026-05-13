@@ -38,10 +38,14 @@ final class MeetingDetectionService {
     // so we don't fire a phantom "meeting detected" banner from our own recording.
     @ObservationIgnored private var isSuspended: Bool = false
 
-    @ObservationIgnored private var workspaceObservers: [NSObjectProtocol] = []
-    @ObservationIgnored private var currentInputDeviceID: AudioDeviceID = kAudioObjectUnknown
-    @ObservationIgnored private var micListenerBlock: AudioObjectPropertyListenerBlock?
-    @ObservationIgnored private var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock?
+    // All registration state lives on `listenerCleanup`. Single source of truth
+    // so the deinit and the runtime mutators can't drift out of sync. The
+    // cleanup object itself is in a nonisolated reference type so its `deinit`
+    // (which runs off the main actor) can call the thread-safe removal APIs
+    // without violating actor isolation. In production this lives at app root
+    // for the process lifetime, but tests and future callers may construct /
+    // destruct it many times.
+    @ObservationIgnored private let listenerCleanup = ListenerCleanup()
 
     init(recordingState: RecordingState) {
         self.recordingState = recordingState
@@ -58,8 +62,9 @@ final class MeetingDetectionService {
         reevaluate()
     }
 
-    // Owned by SwiftUI @State at the app root, so this never deinits in practice.
-    // Skip teardown rather than fight the nonisolated-deinit rules.
+    // Teardown of workspace observers + CoreAudio listeners is handled by
+    // `listenerCleanup`'s nonisolated deinit — we can't run that work from
+    // this type's deinit because the listener block isn't Sendable.
 
     // MARK: - Public API
 
@@ -181,7 +186,7 @@ final class MeetingDetectionService {
             }
         }
 
-        workspaceObservers = [launch, terminate, activate]
+        listenerCleanup.workspaceObservers = [launch, terminate, activate]
     }
 
     // MARK: - CoreAudio
@@ -214,19 +219,20 @@ final class MeetingDetectionService {
         let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &addr, DispatchQueue.main, block)
         if status == noErr {
-            defaultDeviceListenerBlock = block
+            listenerCleanup.defaultDeviceListenerBlock = block
         }
     }
 
     private func rebindMicListener() {
         // Remove existing listener on old device.
-        if let oldBlock = micListenerBlock, currentInputDeviceID != kAudioObjectUnknown {
+        if let oldBlock = listenerCleanup.micListenerBlock,
+           listenerCleanup.micListenerDeviceID != kAudioObjectUnknown {
             var addr = Self.makeMicRunningAddress()
             AudioObjectRemovePropertyListenerBlock(
-                currentInputDeviceID, &addr, DispatchQueue.main, oldBlock)
+                listenerCleanup.micListenerDeviceID, &addr, DispatchQueue.main, oldBlock)
         }
-        micListenerBlock = nil
-        currentInputDeviceID = kAudioObjectUnknown
+        listenerCleanup.micListenerBlock = nil
+        listenerCleanup.micListenerDeviceID = kAudioObjectUnknown
 
         guard let newDeviceID = Self.defaultInputDeviceID() else {
             micActive = false
@@ -234,7 +240,6 @@ final class MeetingDetectionService {
             return
         }
 
-        currentInputDeviceID = newDeviceID
         micActive = Self.readIsRunningSomewhere(deviceID: newDeviceID)
 
         var addr = Self.makeMicRunningAddress()
@@ -250,7 +255,8 @@ final class MeetingDetectionService {
         let status = AudioObjectAddPropertyListenerBlock(
             newDeviceID, &addr, DispatchQueue.main, block)
         if status == noErr {
-            micListenerBlock = block
+            listenerCleanup.micListenerBlock = block
+            listenerCleanup.micListenerDeviceID = newDeviceID
         }
         reevaluate()
     }
@@ -377,6 +383,46 @@ final class MeetingDetectionService {
         if lastNotifiedBundleID != nil {
             lastNotifiedBundleID = nil
             banner.hide()
+        }
+    }
+}
+
+/// Holds the registration state for every observer/listener the service owns
+/// and tears them down in its deinit. Lives in a separate class so the cleanup
+/// runs nonisolated — `MeetingDetectionService` is `@MainActor`, but
+/// `removeObserver` / `AudioObjectRemovePropertyListenerBlock` are thread-safe.
+/// Marked `@unchecked Sendable` because the listener-block properties are
+/// non-Sendable function types but only mutated from the main actor.
+private final class ListenerCleanup: @unchecked Sendable {
+    var workspaceObservers: [NSObjectProtocol] = []
+    var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock?
+    var micListenerBlock: AudioObjectPropertyListenerBlock?
+    var micListenerDeviceID: AudioDeviceID = kAudioObjectUnknown
+
+    deinit {
+        let center = NSWorkspace.shared.notificationCenter
+        for token in workspaceObservers {
+            center.removeObserver(token)
+        }
+
+        if let block = defaultDeviceListenerBlock {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &addr, DispatchQueue.main, block)
+        }
+
+        if let block = micListenerBlock, micListenerDeviceID != kAudioObjectUnknown {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                micListenerDeviceID, &addr, DispatchQueue.main, block)
         }
     }
 }

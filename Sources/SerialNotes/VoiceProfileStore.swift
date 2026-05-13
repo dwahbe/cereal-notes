@@ -8,6 +8,13 @@ final class VoiceProfileStore {
 
     private let directory: URL
 
+    /// Caches the decoded WAV samples keyed by profile ID so repeated session
+    /// starts (the read happens once per `RecordingState.start()`) don't reopen
+    /// + decode each enrollment clip. Invalidated on save / rename / delete /
+    /// reload — all explicit user actions.
+    @ObservationIgnored
+    private var clipSampleCache: [UUID: (samples: [Float], sampleRate: Double)] = [:]
+
     init() {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
@@ -17,9 +24,17 @@ final class VoiceProfileStore {
             .appendingPathComponent("SerialNotes", isDirectory: true)
             .appendingPathComponent("voices", isDirectory: true)
 
-        try? FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true
-        )
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true
+            )
+        } catch {
+            // If we can't create the voice directory, profiles can't be saved
+            // or loaded. Surface it in the log so a missing directory doesn't
+            // look like the user simply has no profiles.
+            NSLog("[SerialNotes/VoiceProfileStore] failed to create directory %@: %@",
+                  directory.path, error.localizedDescription)
+        }
         reload()
     }
 
@@ -34,6 +49,7 @@ final class VoiceProfileStore {
     // MARK: - CRUD
 
     func reload() {
+        clipSampleCache.removeAll(keepingCapacity: true)
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: nil
@@ -109,8 +125,12 @@ final class VoiceProfileStore {
 
     // MARK: - Audio loading (for priming diarizers)
 
-    /// Load a profile's enrollment clip as mono float32 samples.
+    /// Load a profile's enrollment clip as mono float32 samples. Cached after
+    /// the first call; cache is invalidated on `reload()` (which runs after
+    /// every save / rename / delete).
     func loadClipSamples(for profile: VoiceProfile) -> (samples: [Float], sampleRate: Double)? {
+        if let cached = clipSampleCache[profile.id] { return cached }
+
         let url = clipURL(for: profile.id)
         guard let file = try? AVAudioFile(forReading: url) else { return nil }
 
@@ -131,7 +151,9 @@ final class VoiceProfileStore {
             start: channelData[0],
             count: Int(buffer.frameLength)
         ))
-        return (samples, format.sampleRate)
+        let result = (samples: samples, sampleRate: format.sampleRate)
+        clipSampleCache[profile.id] = result
+        return result
     }
 
     // MARK: - Paths

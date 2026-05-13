@@ -110,9 +110,18 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
         // AVAudioEngine + installTap doesn't reliably surface sub-tap audio
         // from a tap-aggregate device on macOS 14+. Use a raw IOProc so the
         // audio HAL delivers buffers directly.
-        try startSystemAudioIOProc(sessionDir: sessionDir, aggDeviceID: info.aggregateDeviceID)
-
-        try startMicrophoneEngine(sessionDir: sessionDir, micGranted: micGranted)
+        //
+        // Both starts can throw: the IOProc setup leaves a running real-time
+        // thread + aggregate device behind on success, so a subsequent mic
+        // failure must tear it all down before the throw propagates. The SCK
+        // path mirrors this pattern.
+        do {
+            try startSystemAudioIOProc(sessionDir: sessionDir, aggDeviceID: info.aggregateDeviceID)
+            try startMicrophoneEngine(sessionDir: sessionDir, micGranted: micGranted)
+        } catch {
+            cleanupEngines()
+            throw error
+        }
     }
 
     // MARK: - System Audio IOProc (raw HAL — bypasses AVAudioEngine)

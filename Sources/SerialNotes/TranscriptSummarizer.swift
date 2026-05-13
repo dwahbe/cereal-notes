@@ -1,5 +1,5 @@
 import Foundation
-import FoundationModels
+@preconcurrency import FoundationModels
 
 /// One action item extracted from a transcript. `owner` is non-nil only when
 /// the transcript explicitly names a person — never inferred.
@@ -26,6 +26,15 @@ protocol TranscriptSummarizer: Sendable {
         generateSummary: Bool,
         generateActionItems: Bool
     ) async -> SummaryResult
+
+    /// Optional warm-up — gives the underlying model a chance to load so the
+    /// real call at session end doesn't pay cold-start latency. Default no-op
+    /// for implementations that don't need it.
+    func prewarm() async
+}
+
+extension TranscriptSummarizer {
+    func prewarm() async {}
 }
 
 enum TranscriptSummarizerFactory {
@@ -97,6 +106,19 @@ actor FoundationModelsSummarizer: TranscriptSummarizer {
     init() {
         summarySession = LanguageModelSession(instructions: Self.summaryInstructions)
         actionSession = LanguageModelSession(instructions: Self.actionItemInstructions)
+    }
+
+    /// Hits both sessions with a tiny prompt in parallel so the first real
+    /// summarize call at session end doesn't eat cold-start latency
+    /// (~200–500ms per session). Errors are intentionally swallowed — this is
+    /// a perf hint, not a correctness requirement.
+    func prewarm() async {
+        async let warmSummary = try? await summarySession.respond(
+            to: "warm up", generating: MeetingSummary.self)
+        async let warmActions = try? await actionSession.respond(
+            to: "warm up", generating: GeneratedActionItemList.self)
+        _ = await warmSummary
+        _ = await warmActions
     }
 
     func summarize(
@@ -301,21 +323,5 @@ enum SummarizerTextProcessing {
     }
 }
 
-// MARK: - Timeout helper
-
-private struct SummarizerTimeoutError: Error {}
-
-private func withTimeout<T: Sendable>(
-    _ duration: Duration,
-    operation: @Sendable @escaping () async throws -> T
-) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { try await operation() }
-        group.addTask {
-            try await Task.sleep(for: duration)
-            throw SummarizerTimeoutError()
-        }
-        defer { group.cancelAll() }
-        return try await group.next()!
-    }
-}
+// withTimeout + TimeoutError live in TranscriptRewriter.swift — both run
+// on-device LanguageModelSessions that need the same stall protection.

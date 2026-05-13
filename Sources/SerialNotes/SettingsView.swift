@@ -31,8 +31,24 @@ private struct SettingsWindowChrome: NSViewRepresentable {
 }
 
 private final class WindowCloseObserver: NSView {
+    private var observedWindow: NSWindow?
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+
+        // Drop any prior registration before re-registering — guards against
+        // SwiftUI recreating the representable or the view being remounted on
+        // a different window. Otherwise observers accumulate and `windowWillClose`
+        // fires N times per close.
+        if let prior = observedWindow {
+            NotificationCenter.default.removeObserver(
+                self,
+                name: NSWindow.willCloseNotification,
+                object: prior
+            )
+            observedWindow = nil
+        }
+
         guard let window else { return }
         NotificationCenter.default.addObserver(
             self,
@@ -40,6 +56,13 @@ private final class WindowCloseObserver: NSView {
             name: NSWindow.willCloseNotification,
             object: window
         )
+        observedWindow = window
+    }
+
+    deinit {
+        // Selector-based observers don't retain self, but the registration
+        // entry persists. Explicit removal keeps NotificationCenter clean.
+        NotificationCenter.default.removeObserver(self)
     }
 
     @objc private func windowWillClose(_ note: Notification) {

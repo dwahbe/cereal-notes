@@ -51,10 +51,15 @@ final class RecordingState {
             // bleed into stale state.
             let now = Date()
             let enrollments = loadEnrollments()
+            // Pass the start-time snapshot so the summarizer can prewarm during
+            // the recording. If the user toggles summary on later, the splice
+            // step falls back to lazy construction.
+            let summarySnapshot = summarySettings?.snapshot() ?? .disabled
             try await transcriptionService.startSession(
                 sessionDirectory: sessionDir,
                 sessionStart: now,
-                enrollments: enrollments
+                enrollments: enrollments,
+                summarySettings: summarySnapshot
             )
 
             // Wire audio buffer callbacks for transcription.
@@ -153,8 +158,14 @@ final class RecordingState {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let url = sessionDir.appendingPathComponent("session.json")
-        if let data = try? encoder.encode(payload) {
-            try? data.write(to: url, options: [.atomic])
+        do {
+            let data = try encoder.encode(payload)
+            try data.write(to: url, options: [.atomic])
+        } catch {
+            // Diagnostics-only — don't surface in UI, but log so debugging
+            // a missing session.json doesn't look like nothing happened.
+            NSLog("[SerialNotes/RecordingState] failed to write session.json: %@",
+                  error.localizedDescription)
         }
     }
 

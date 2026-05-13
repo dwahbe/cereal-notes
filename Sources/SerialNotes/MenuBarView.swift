@@ -234,9 +234,10 @@ struct MenuBarView: View {
                 .font(.headline)
         }
 
-        Text(recordingState.formattedElapsedTime)
-            .font(.system(.title, design: .monospaced))
-            .contentTransition(.numericText())
+        // Extracted so SwiftUI's @Observable dependency tracking only invalidates
+        // this small subtree on each 1Hz tick — the rest of `recordingContent`
+        // (and the parent `body`) stays stable.
+        ElapsedTimeText(recordingState: recordingState)
 
         Button(action: { recordingState.stop() }) {
             Label("Stop Recording", systemImage: "stop.circle")
@@ -254,4 +255,14 @@ struct MenuBarView: View {
         }
     }
 
+}
+
+private struct ElapsedTimeText: View {
+    let recordingState: RecordingState
+
+    var body: some View {
+        Text(recordingState.formattedElapsedTime)
+            .font(.system(.title, design: .monospaced))
+            .contentTransition(.numericText())
+    }
 }

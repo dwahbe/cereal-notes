@@ -56,9 +56,6 @@ struct SerialNotesApp: App {
                 .environment(meetingDetectionService)
                 .environment(voiceProfileStore)
                 .preferredColorScheme(.dark)
-                .task {
-                    await modelDownloadState.downloadIfNeeded()
-                }
         } label: {
             Image(systemName: recordingState.isRecording ? "record.circle" : "waveform.circle")
         }

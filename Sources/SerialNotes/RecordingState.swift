@@ -39,7 +39,7 @@ final class RecordingState {
             await transcriptionService.setCallbacks(
                 onError: { [weak self] error in
                     Task { @MainActor in
-                        self?.errorMessage = error.localizedDescription
+                        self?.errorMessage = TranscriptionError.userFacingDescription(for: error)
                     }
                 }
             )

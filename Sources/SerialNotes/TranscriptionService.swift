@@ -56,6 +56,7 @@ actor TranscriptionService {
     private static let maxEchoSuppressionSystemEntries = 64
     private static let minimumFinalAudioDuration: TimeInterval = 1.0
     private static let diarizerProcessInterval: TimeInterval = 0.75
+    private static let streamingErrorReportThreshold = 5
 
     private var modelsLoaded = false
 
@@ -188,7 +189,7 @@ actor TranscriptionService {
                     enqueueFinalUtterance(text, source: side)
                 }
             } catch {
-                onError?(error)
+                await handleStreamingASRError(error, source: side, stage: "finish")
             }
         }
 
@@ -328,15 +329,51 @@ actor TranscriptionService {
                     state.diarizerSamplesSinceProcess = 0
                 }
             } catch {
-                onError?(error)
+                handleDiarizerError(error, source: source, state: state)
             }
         }
 
         do {
             _ = try await asr.process(audioBuffer: buffer)
+            state.streamingASRConsecutiveFailures = 0
         } catch {
-            onError?(error)
+            await handleStreamingASRError(error, source: source, stage: "process")
         }
+    }
+
+    private func handleDiarizerError(_ error: Error, source: AudioSide, state: SideState) {
+        state.diarizerConsecutiveFailures += 1
+        NSLog(
+            "[SerialNotes/Transcription] live diarizer \(source.logName) failed (\(state.diarizerConsecutiveFailures) consecutive): \(diagnosticDescription(for: error))"
+        )
+
+        // Speaker labels are best-effort. Avoid surfacing raw Core ML errors in
+        // the UI; the ASR path can still produce a transcript without diarizer
+        // output, and `LSEENDDiarizer` clears pending audio on failed process().
+    }
+
+    private func handleStreamingASRError(_ error: Error, source: AudioSide, stage: String) async {
+        let state = sideState(for: source)
+        state.streamingASRConsecutiveFailures += 1
+        NSLog(
+            "[SerialNotes/Transcription] live ASR \(source.logName) \(stage) failed (\(state.streamingASRConsecutiveFailures) consecutive): \(diagnosticDescription(for: error))"
+        )
+
+        // FluidAudio's streaming manager keeps its buffered audio if Core ML
+        // throws during prediction. Reset this side so the next callback starts
+        // from fresh audio instead of retrying the same failed chunk forever.
+        await state.asr?.reset()
+        state.lastUtteranceEndSamples = state.samplesProcessed
+
+        guard state.streamingASRConsecutiveFailures == Self.streamingErrorReportThreshold else {
+            return
+        }
+        onError?(TranscriptionError.streamingTranscriptionDegraded)
+    }
+
+    private nonisolated func diagnosticDescription(for error: Error) -> String {
+        let nsError = error as NSError
+        return "\(nsError.domain)(\(nsError.code)): \(nsError.localizedDescription)"
     }
 
     // MARK: - EOU Handlers
@@ -843,6 +880,13 @@ enum AudioSide: CaseIterable, Hashable, Sendable {
         case .mic: return 1
         }
     }
+
+    var logName: String {
+        switch self {
+        case .mic: return "mic"
+        case .system: return "system"
+        }
+    }
 }
 
 private final class SideState {
@@ -856,6 +900,8 @@ private final class SideState {
     var nextSystemPersonNumber = 1
     var micSeenPrimarySpeaker = false
     var nextMicVoiceNumber = 2
+    var streamingASRConsecutiveFailures = 0
+    var diarizerConsecutiveFailures = 0
 
     func resetSession() {
         samplesProcessed = 0
@@ -866,6 +912,8 @@ private final class SideState {
         nextSystemPersonNumber = 1
         micSeenPrimarySpeaker = false
         nextMicVoiceNumber = 2
+        streamingASRConsecutiveFailures = 0
+        diarizerConsecutiveFailures = 0
     }
 }
 
@@ -880,12 +928,32 @@ private struct RenderedTranscript {
 
 enum TranscriptionError: LocalizedError {
     case modelsNotLoaded
+    case streamingTranscriptionDegraded
+
+    static func userFacingDescription(for error: Error) -> String {
+        if let transcriptionError = error as? TranscriptionError {
+            return transcriptionError.localizedDescription
+        }
+
+        let description = error.localizedDescription
+        if isCoreMLPredictionFailure(description) {
+            return TranscriptionError.streamingTranscriptionDegraded.localizedDescription
+        }
+        return description
+    }
 
     var errorDescription: String? {
         switch self {
         case .modelsNotLoaded:
             return "Transcription models have not been downloaded yet."
+        case .streamingTranscriptionDegraded:
+            return "Live transcription hit repeated model errors. Recording will continue, but the transcript may be incomplete."
         }
+    }
+
+    private static func isCoreMLPredictionFailure(_ description: String) -> Bool {
+        let lowercased = description.lowercased()
+        return lowercased.contains("ml program") && lowercased.contains("prediction")
     }
 }
 
